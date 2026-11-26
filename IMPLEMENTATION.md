@@ -846,6 +846,14 @@ Still open:
       the `cp` steps and the real error was masked by
       `cp: cannot create regular file 'bin/…'`. Recipes now run under
       `set -e`.
+    - **`gstreamer1.0-x` missing on CI (third run):** the compositor/layer
+      tests build text layers, and the `textoverlay` GStreamer element lives in
+      `libgstpango.so` = package **`gstreamer1.0-x`** (not in base/good/ugly/
+      bad) → `textoverlay element factory not available` on 6 tests. Added
+      `gstreamer1.0-x` to the gstreamer tier apt line. `TestBrowserLineBounceSmoothness`
+      (SwiftShader 1080p perf probe, 45 fps gate) rendered 42.5 fps on the
+      2-vCPU runner, so it now skips when `CI` is set — the probe stays the
+      regression gate on real hosts.
     - **Relative cgo paths broken arm64 cross-compile:** the CI
       `cross-arm64` job's inline go build used `BUNDLE=.build/ceralive-srt/arm64`
       with `CGO_CFLAGS="-I$BUNDLE/include"` / `CGO_LDFLAGS="-L$BUNDLE/lib …"`.
