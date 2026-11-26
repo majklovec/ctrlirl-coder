@@ -1,3 +1,10 @@
+## [1.0.1](https://github.com/majklovec/ctrlirl-coder/compare/v1.0.0...v1.0.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* **ci:** keep main-only gating on dist jobs after workflow cleanup ([7a3e659](https://github.com/majklovec/ctrlirl-coder/commit/7a3e659bf26ba4de344a23b6ceb59bb6fede5b02))
+
 # 1.0.0 (2026-11-26)
 
 
