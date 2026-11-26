@@ -827,6 +827,32 @@ Still open:
     mux x36xhzz.m3u8 streams 150 s continuous, 0 stalls, A and V packet
     PTS fully continuous with matching start (1.400 s) and end
     (≈151.37 s) — no gap at any 6 s segment boundary.
+- **2026-11-26 (CI fixes: apt package, relative cgo paths, bun test flakiness):**
+  Three CI failures on `ubuntu-latest` (Ubuntu 26.04 "resolute"):
+    - **`gstreamer1.0-tools-good` no longer exists** in Ubuntu 26.04 (same as
+      bookworm, noted above) — `apt-get` exit 100 killed the GStreamer tier. The
+      gstreamer tier now installs only `gstreamer1.0-tools` (provides
+      `gst-launch-1.0`, all the stream/integration scripts need).
+    - **Relative cgo paths broken arm64 cross-compile:** the CI
+      `cross-arm64` job's inline go build used `BUNDLE=.build/ceralive-srt/arm64`
+      with `CGO_CFLAGS="-I$BUNDLE/include"` / `CGO_LDFLAGS="-L$BUNDLE/lib …"`.
+      cgo compiles in a temp dir, so the relative `-I/-L` resolved nowhere →
+      `srt/srt.h: No such file or directory`. Fixed to `BUNDLE="$PWD/…"` in the
+      workflow, and hardened the Makefile: `CERALIVE_CGO_CFLAGS` /
+      `CERALIVE_CGO_LDFLAGS` now use `$(abspath $(BUNDLE_DIR))` so any consumer
+      is immune. Verified: the exact CI cross-compile command now produces a
+      valid `ELF 64-bit … ARM aarch64` binary.
+    - **TS bindings `bun test` failures:** (a) the dry-run test's binary-missing
+      guard used `Bun.file(binPath).exists()` — **a Promise, always truthy** —
+      so the "skip when no binary" clause never fired and `Bun.spawn` threw
+      `ENOENT` on runners without `bin/`. New synchronous `fileExists()`
+      (node:fs `statSync`) in `bindings/src/process.ts`; the test skips in 0.15 ms
+      without a binary. (b) the stub signal-lifecycle test raced CI's slow node
+      start: SIGHUP landed before the stub's `process.on("SIGHUP")` was
+      registered, node's default SIGHUP action killed the stub, and `sendTerm()`
+      hit `ESRCH`. Tests now `waitForLine()` on the stub's `stub: up` /
+      `stub: env=hello` lines (handlers registered) instead of fixed 200 ms
+      sleeps.
 - **2026-11-25 (deb install path → `/usr/local/bin`):** The `.deb` now installs the
   binary at `/usr/local/bin/ctrlirl-coder` (with the CERALIVE `libsrt.so.1.5` and
   `build.json` alongside it) instead of `/opt/ctrlirl-coder/`, and drops the old

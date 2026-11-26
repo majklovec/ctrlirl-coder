@@ -5,14 +5,35 @@ import { describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { buildCtrlIRLCoderConfig } from "../src/config";
 import { PipelineBuilder } from "../src/pipeline";
-import { spawnCtrlIRLCoder, writeConfig, writeScene } from "../src/process";
+import {
+    fileExists,
+    spawnCtrlIRLCoder,
+    writeConfig,
+    writeScene,
+} from "../src/process";
 import { SceneBuilder } from "../src/scene";
 
 const tmp = `${import.meta.dir}/../.tmp`;
 const binPath =
     process.env.CTRLIRL_CODER_BIN ??
     `${import.meta.dir}/../../bin/ctrlirl-coder-linux-amd64`;
-const haveBin = Bun.file(binPath).exists();
+const haveBin = fileExists(binPath);
+
+// Wait for a line in `out` (the child is up and its signal handlers are
+// registered) or fail after ~5s. Plain sleep races CI's slow node start, so
+// SIGHUP can land before the stub's handler exists (default action: exit).
+async function waitForLine(
+    out: string[],
+    line: string,
+    timeoutMs = 5000,
+): Promise<void> {
+    const start = Date.now();
+    while (!out.includes(line)) {
+        if (Date.now() - start > timeoutMs)
+            throw new Error(`timed out waiting for "${line}" (got: ${out.join(" | ")})`);
+        await Bun.sleep(20);
+    }
+}
 
 function stubPath(): string {
     const p = `${tmp}/signal-stub.mjs`;
@@ -44,10 +65,10 @@ describe("process control", () => {
             },
         });
         expect(proc.pid).toBeGreaterThan(0);
-        // Let the stub register its signal handlers first.
-        await Bun.sleep(200);
+        // Wait until the stub is up and its signal handlers are registered.
+        await waitForLine(out, "stub: up");
         proc.sendHup();
-        await Bun.sleep(100);
+        await waitForLine(out, "stub: hup");
         proc.sendTerm();
         const code = await proc.wait();
         expect(code).toBe(0);
@@ -128,8 +149,9 @@ describe("process control", () => {
             env: { STUB_ENV_PROBE: "hello" },
             onStdout: (l) => out.push(l),
         });
-        // Let the stub register its SIGTERM handler before signalling.
-        await Bun.sleep(200);
+        // Wait for the stub's env probe line: proves env reached the child
+        // AND its SIGTERM handler is registered before signalling.
+        await waitForLine(out, "stub: env=hello");
         proc.sendTerm();
         const code = await proc.wait();
         expect(code).toBe(0);

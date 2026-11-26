@@ -2,7 +2,7 @@
 // writing and signal delivery happen here, Bun-first with a Node fallback.
 
 import { spawn as nodeSpawn } from "node:child_process";
-import { mkdirSync, writeFileSync as nodeWriteFileSync } from "node:fs";
+import { mkdirSync, statSync, writeFileSync as nodeWriteFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { buildCtrlIRLCoderArgs, type CtrlIRLCoderArgsOptions } from "./args";
 import { buildCtrlIRLCoderConfig, type CtrlIRLCoderConfig } from "./config";
@@ -73,6 +73,18 @@ export async function writeFile(path: string, content: string): Promise<void> {
 export function writeFileSync(path: string, content: string): void {
     mkdirSync(dirname(path), { recursive: true });
     nodeWriteFileSync(path, content, "utf8");
+}
+
+// Synchronous existence check. node:fs works under both runtimes and in any
+// module loader. (Bun.file().exists() is a PROMISE — truthy even for missing
+// files — so never use it for this.)
+export function fileExists(path: string): boolean {
+    try {
+        statSync(path);
+        return true;
+    } catch {
+        return false;
+    }
 }
 
 type Chunk = Uint8Array | string;

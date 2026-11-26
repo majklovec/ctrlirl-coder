@@ -46,7 +46,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             gcc g++ cmake pkg-config git \
             libglib2.0-dev libgnutls28-dev \
-            gstreamer1.0-dev gstreamer1.0-tools gstreamer1.0-tools-good \
+            gstreamer1.0-dev gstreamer1.0-tools \
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad \
             gstreamer1.0-libav
@@ -88,7 +88,9 @@ jobs:
         run: bash scripts/build-ceralive-srt.sh --arch arm64 --out .build/ceralive-srt/arm64
       - name: Cross-compile arm64 binary against the fork
         run: |
-          BUNDLE=.build/ceralive-srt/arm64
+          # Absolute paths: cgo compiles in a temp dir, so relative -I/-L
+          # would resolve nowhere (srt/srt.h: No such file or directory).
+          BUNDLE="$PWD/.build/ceralive-srt/arm64"
           sha=$(sed -n 's/.*"lib_sha256": "\([0-9a-f]*\)".*/\1/p' "$BUNDLE/build.json")
           src=$(sed -n 's/.*"source_sha": "\([0-9a-f]*\)".*/\1/p' "$BUNDLE/build.json")
           CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \

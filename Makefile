@@ -28,9 +28,10 @@ BUNDLE_DIR  := .build/ceralive-srt/amd64
 BUNDLE_JSON := $(BUNDLE_DIR)/build.json
 SRT_PKG     := ctrlirl-coder/internal/sinks/srt
 # CGO flags that bind cgo to the bundled fork + its headers, and load it next to
-# the binary ($ORIGIN) rather than from a system path.
-CERALIVE_CGO_LDFLAGS := -L$(BUNDLE_DIR)/lib -lsrt -Wl,-rpath,\$$ORIGIN -Wl,--enable-new-dtags
-CERALIVE_CGO_CFLAGS  := -I$(BUNDLE_DIR)/include
+# the binary ($ORIGIN) rather than from a system path. Absolute paths are
+# mandatory: cgo compiles in a temp dir, so relative -I/-L resolve nowhere.
+CERALIVE_CGO_LDFLAGS := -L$(abspath $(BUNDLE_DIR))/lib -lsrt -Wl,-rpath,\$$ORIGIN -Wl,--enable-new-dtags
+CERALIVE_CGO_CFLAGS  := -I$(abspath $(BUNDLE_DIR))/include
 # Embed the built fork's identity (CERALIVE_LIB_SHA / CERALIVE_SRC_SHA are set in
 # each recipe from the fresh bundle before the go build runs).
 
