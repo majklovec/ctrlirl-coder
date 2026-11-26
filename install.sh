@@ -7,6 +7,7 @@ core_pkgs=(
 	gstreamer1.0-plugins-ugly # x264enc
 	gstreamer1.0-plugins-bad  # voaacenc, aacparse (audio track)
 	gstreamer1.0-libav        # decodebin/uridecodebin inputs
+	gstreamer1.0-x            # textoverlay (text layers)
 	# browser layer audio: page audio lives on a PipeWire/Pulse null sink
 	libpulse0        # Pulse/PipeWire client library
 	pulseaudio-utils # pactl (per-layer null sink create/unload)

@@ -118,7 +118,7 @@ go build -tags gstreamer -o bin/ctrlirl-coder-linux-arm64 ./cmd/ctrlirl-coder
 
 Alternatives for the cgo tier: `make docker-arm64` (Docker buildx; on an
 x86 host the go binary comes from the native `cross` stage of the
-Dockerfile — emulated cgo is not used) or CI's `cross-arm64` job.
+Dockerfile — emulated cgo is not used) or CI's `dist-arm64` job.
 Smoke-checking an arm64 binary on an x86 host: `qemu-aarch64-static -L
 /usr/aarch64-linux-gnu bin/ctrlirl-coder-linux-arm64 --dry-run …`.
 
@@ -148,6 +148,23 @@ make deb-arm64
 ```
 
 (Without the toolchain it falls back to a docker buildx image, emulated.)
+
+### Installing from the deb package repo (published on every push to `main`)
+
+CI publishes `amd64` + `arm64` `.deb` builds to a static apt repository on
+GitHub Pages (unsigned — add it with `[trusted=yes]`):
+
+```sh
+echo "deb [trusted=yes] https://majklovec.github.io/ctrlirl-coder/deb/dists main" \
+  | sudo tee /etc/apt/sources.list.d/ctrlirl-coder.list
+sudo apt-get update
+sudo apt-get install ctrlirl-coder
+```
+
+Version is `0.9.<github-run-number>-1`, so each push to `main` is a strictly
+newer package: `sudo apt-get upgrade ctrlirl-coder` tracks the latest build.
+Per-run binaries + libsrt + `.deb` are also available as GitHub Actions
+artifacts (`ctrlirl-coder-amd64` / `ctrlirl-coder-arm64`).
 
 ```sh
 make deb

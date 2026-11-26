@@ -10,10 +10,9 @@ env:
 
 jobs:
   # Pure-Go tier: packages with no cgo in their dependency graph. No GStreamer
-  # and no CERALIVE needed. The full binary (cmd/ctrlirl-coder) is cgo
-  # end-to-end (GStreamer + the CERALIVE SRT fork), so it is NOT built here.
+  # and no CERALIVE needed.
   pure-go:
-    name: Pure-Go (vet, test)
+    name: Test pure-Go (vet, test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,100 +22,17 @@ jobs:
           cache: false
       # cgo-free set: balancer, config, controller, metrics, rpc, scene,
       # server, sinks, sinks/srtla. (compositor/gstutil/gstpull/layer/sinks/srt
-      # pull in GStreamer + the SRT fork and run in the GStreamer tier.)
+      # pull in GStreamer + the SRT fork and run in the dist-amd64 job.)
       - name: go vet (pure-Go set)
         run: go vet ./internal/balancer/... ./internal/config ./internal/controller ./internal/metrics ./internal/rpc ./internal/scene ./internal/server ./internal/sinks ./internal/sinks/srtla
       - name: go test (pure-Go set)
         run: go test ./internal/balancer/... ./internal/config ./internal/controller ./internal/metrics ./internal/rpc ./internal/scene ./internal/server ./internal/sinks ./internal/sinks/srtla
 
-  # GStreamer tier: build the CERALIVE SRT bundle, build + test the full
-  # binary against it, and run the integration smoke.
-  gstreamer:
-    name: GStreamer tier (CERALIVE build, test, integration)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: false
-      - name: Install GStreamer dev + plugins + CERALIVE build deps (gnuTLS, cmake, c++)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc g++ cmake pkg-config git \
-            libglib2.0-dev libgnutls28-dev \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-            gstreamer1.0-tools \
-            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-            gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad \
-            gstreamer1.0-libav gstreamer1.0-x
-      - name: Build CERALIVE SRT bundle (amd64)
-        run: make bundle-amd64
-      - name: Build binary (link CERALIVE, embed identity)
-        run: make dist-amd64
-      - name: Vet + test (full suite against the fork)
-        run: |
-          make vet
-          make test
-      - name: SRT stream test (full pipeline vs local listener)
-        run: bash scripts/test-stream.sh
-      - name: Integration smoke (layered + full pipelines vs local srtsrc)
-        run: bash scripts/integration-smoke.sh
-
-  # arm64 cross-compilation: build the CERALIVE fork for arm64, cross-compile
-  # the cgo binary against it, upload.
-  cross-arm64:
-    name: Cross-compile linux/arm64 (GStreamer + CERALIVE)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: false
-      - name: Install arm64 cross toolchain + GStreamer + gnuTLS multiarch dev
-        run: |
-          sudo dpkg --add-architecture arm64
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            cmake pkg-config git \
-            libglib2.0-dev:arm64 \
-            libgnutls28-dev:arm64 \
-            libgstreamer1.0-dev:arm64 \
-            libgstreamer-plugins-base1.0-dev:arm64
-      - name: Build CERALIVE SRT bundle (arm64 cross)
-        run: bash scripts/build-ceralive-srt.sh --arch arm64 --out .build/ceralive-srt/arm64
-      - name: Cross-compile arm64 binary against the fork
-        run: |
-          # Absolute paths: cgo compiles in a temp dir, so relative -I/-L
-          # would resolve nowhere (srt/srt.h: No such file or directory).
-          BUNDLE="$PWD/.build/ceralive-srt/arm64"
-          sha=$(sed -n 's/.*"lib_sha256": "\([0-9a-f]*\)".*/\1/p' "$BUNDLE/build.json")
-          src=$(sed -n 's/.*"source_sha": "\([0-9a-f]*\)".*/\1/p' "$BUNDLE/build.json")
-          CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
-            PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
-            CGO_CFLAGS="-I$BUNDLE/include" \
-            CGO_LDFLAGS="-L$BUNDLE/lib -lsrt -Wl,-rpath,\$$ORIGIN -Wl,--enable-new-dtags" \
-            go build -ldflags "-X ctrlirl-coder/internal/sinks/srt.ceraliveLibSHA256=$sha -X ctrlirl-coder/internal/sinks/srt.ceraliveSourceSHA=$src" \
-            -o bin/ctrlirl-coder-linux-arm64 ./cmd/ctrlirl-coder
-          libfile=$(sed -n 's/.*"lib_file": "\([^"]*\)".*/\1/p' "$BUNDLE/build.json"); cp "$BUNDLE/$libfile" bin/arm64-libsrt.so.1.5
-          cp "$BUNDLE/build.json" bin/arm64-build.json
-      - name: Upload arm64 artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ctrlirl-coder-linux-arm64
-          path: |
-            bin/ctrlirl-coder-linux-arm64
-            bin/arm64-libsrt.so.1.5
-            bin/arm64-build.json
-
   # TypeScript bindings tier: unit tests + typecheck. The binary-spawning
-  # integration test is skipped when the Go binary is absent, so no GStreamer
-  # or CERALIVE build is needed here.
+  # integration test skips when the Go binary is absent, so no GStreamer build
+  # is needed here.
   bindings:
-    name: TS bindings (bun test, typecheck)
+    name: Test TS bindings (bun test, typecheck)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -132,3 +48,213 @@ jobs:
       - name: typecheck
         run: bun run typecheck
         working-directory: bindings
+
+  # Native amd64: build the CERALIVE SRT bundle + binary, run the full test
+  # suite (go test, SRT stream, integration smoke), build the .deb, publish.
+  dist-amd64:
+    name: Build + test amd64, publish
+    runs-on: ubuntu-latest
+    env:
+      DEB_VERSION: "0.9.${{ github.run_number }}"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Install GStreamer dev + plugins + CERALIVE build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc g++ cmake pkg-config git dpkg-dev \
+            libglib2.0-dev libgnutls28-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-tools \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad \
+            gstreamer1.0-libav gstreamer1.0-x
+      - name: Build binary (CERALIVE bundle + embedded identity)
+        run: make dist-amd64
+      - name: Vet + test (full suite against the fork)
+        run: |
+          make vet
+          make test
+      - name: SRT stream test (full pipeline vs local listener)
+        run: bash scripts/test-stream.sh
+      - name: Integration smoke (layered + full pipelines vs local srtsrc)
+        run: bash scripts/integration-smoke.sh
+      - name: Build amd64 .deb
+        run: bash scripts/build-deb.sh --arch amd64 --version "$DEB_VERSION"
+      - name: Upload amd64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctrlirl-coder-amd64
+          path: |
+            dist/ctrlirl-coder_*_amd64.deb
+            bin/ctrlirl-coder-linux-amd64
+            bin/libsrt.so.1.5
+            bin/build.json
+      - name: Publish .deb to package repo artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctrlirl-coder-debs
+          path: dist/ctrlirl-coder_*_amd64.deb
+
+  # arm64 cross-compile: build the CERALIVE fork for arm64, cross-compile the
+  # cgo binary against it, smoke it under qemu-user, build the .deb, publish.
+  dist-arm64:
+    name: Build + test arm64 (cross), publish
+    runs-on: ubuntu-latest
+    env:
+      DEB_VERSION: "0.9.${{ github.run_number }}"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Install arm64 cross toolchain + GStreamer + gnuTLS multiarch dev
+        run: |
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu qemu-user-static \
+            cmake pkg-config git dpkg-dev \
+            libglib2.0-dev:arm64 \
+            libgnutls28-dev:arm64 \
+            libgstreamer1.0-dev:arm64 \
+            libgstreamer-plugins-base1.0-dev:arm64
+      - name: Build CERALIVE SRT bundle (arm64 cross)
+        run: bash scripts/build-ceralive-srt.sh --arch arm64 --out "$PWD/.build/ceralive-srt/arm64"
+      - name: Cross-compile arm64 binary against the fork
+        run: |
+          # Absolute paths: cgo compiles in a temp dir, so relative -I/-L
+          # would resolve nowhere (srt/srt.h: No such file or directory).
+          BUNDLE="$PWD/.build/ceralive-srt/arm64"
+          sha=$(sed -n 's/.*"lib_sha256": "\([0-9a-f]*\)".*/\1/p' "$BUNDLE/build.json")
+          src=$(sed -n 's/.*"source_sha": "\([0-9a-f]*\)".*/\1/p' "$BUNDLE/build.json")
+          CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
+            PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
+            CGO_CFLAGS="-I$BUNDLE/include" \
+            CGO_LDFLAGS="-L$BUNDLE/lib -lsrt -Wl,-rpath,\$$ORIGIN -Wl,--enable-new-dtags" \
+            go build -ldflags "-X ctrlirl-coder/internal/sinks/srt.ceraliveLibSHA256=$sha -X ctrlirl-coder/internal/sinks/srt.ceraliveSourceSHA=$src" \
+            -o bin/ctrlirl-coder-linux-arm64 ./cmd/ctrlirl-coder
+          libfile=$(sed -n 's/.*"lib_file": "\([^"]*\)".*/\1/p' "$BUNDLE/build.json"); cp "$BUNDLE/$libfile" bin/arm64-libsrt.so.1.5
+          cp "$BUNDLE/build.json" bin/arm64-build.json
+      - name: Smoke test under qemu-user (boot, CERALIVE guard, contract)
+        run: |
+          # The binary loads the bundled libsrt via $ORIGIN — lib must sit
+          # next to the binary. Full-pipeline runs are too slow under
+          # qemu-user emulation; --dry-run validates start, SRT backend
+          # SHA guard, config/scene/pipeline contract.
+          cp bin/arm64-libsrt.so.1.5 bin/libsrt.so.1.5
+          qemu-aarch64-static -L /usr/aarch64-linux-gnu \
+            ./bin/ctrlirl-coder-linux-arm64 \
+            --config config.toml \
+            --pipeline pipeline/example-full.pipeline \
+            --scene scene.example.json \
+            --dry-run
+      - name: Build arm64 .deb
+        run: bash scripts/build-deb.sh --arch arm64 --version "$DEB_VERSION"
+      - name: Verify .deb contents
+        run: |
+          deb=$(ls dist/ctrlirl-coder_*_arm64.deb)
+          dpkg-deb -I "$deb"
+          dpkg-deb -c "$deb"
+      - name: Upload arm64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctrlirl-coder-arm64
+          path: |
+            dist/ctrlirl-coder_*_arm64.deb
+            bin/ctrlirl-coder-linux-arm64
+            bin/arm64-libsrt.so.1.5
+            bin/arm64-build.json
+      - name: Publish .deb to package repo artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctrlirl-coder-debs
+          path: dist/ctrlirl-coder_*_arm64.deb
+
+  # Deb package repo: index the per-arch .debs and publish them as a static
+  # apt-style repository on GitHub Pages.
+  #
+  #   deb [trusted=yes] https://majklovec.github.io/ctrlirl-coder/deb/dists main
+  #
+  # The repo is unsigned: consumers add it with [trusted=yes] (no keyring).
+  # Version is 0.9.<github-run-number>-1, so each push to main is a strictly
+  # newer package and `apt upgrade` follows the latest build.
+  #
+  # Requires: Settings > Pages > Source = "GitHub Actions" (one-time).
+  package-repo:
+    name: Publish deb package repo (Pages)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [dist-amd64, dist-arm64]
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Download .debs
+        uses: actions/download-artifact@v4
+        with:
+          name: ctrlirl-coder-debs
+          path: debs
+      - name: Install dpkg packaging tools
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev
+      - name: Build repo site
+        run: |
+          set -euo pipefail
+          SITE=site/deb/dists/main
+          mkdir -p "$SITE/binary-amd64" "$SITE/binary-arm64"
+          for f in debs/*.deb; do
+            arch=$(dpkg-deb -f "$f" Architecture)
+            cp "$f" "$SITE/binary-$arch/"
+          done
+          (
+            cd "$SITE"
+            dpkg-scanpackages --multiversion . . /dev/null > Packages
+            gzip -9kf Packages
+          )
+          # Unsigned apt Release metadata (consumed with [trusted=yes]).
+          {
+            echo "Origin: CtrlIRL"
+            echo "Label: ctrlirl-coder"
+            echo "Suite: stable"
+            echo "Codename: main"
+            echo "Architectures: amd64 arm64"
+            echo "Components: main"
+            echo "Description: CtrlIRL-Coder live SRT encoder"
+            echo "Date: $(date -u '+%a, %d %b %Y %H:%M:%S UTC')"
+          } > "$SITE/Release"
+          ls -lR site
+      - name: Write site README
+        run: |
+          cat > site/README.md <<'EOF'
+          # CtrlIRL-Coder — deb package repository
+
+          Latest `.deb` builds, published on every push to `main`.
+          The repository is **unsigned**; add it with `[trusted=yes]`:
+
+          ```sh
+          echo "deb [trusted=yes] https://majklovec.github.io/ctrlirl-coder/deb/dists main" \
+            | sudo tee /etc/apt/sources.list.d/ctrlirl-coder.list
+          sudo apt-get update
+          sudo apt-get install ctrlirl-coder
+          ```
+
+          Package version is `0.9.<github-run-number>-1` — every push to main
+          is a strictly newer version, so `sudo apt-get upgrade ctrlirl-coder`
+          tracks the latest build.
+          EOF
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

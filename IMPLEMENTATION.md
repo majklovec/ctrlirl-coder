@@ -827,6 +827,23 @@ Still open:
     mux x36xhzz.m3u8 streams 150 s continuous, 0 stalls, A and V packet
     PTS fully continuous with matching start (1.400 s) and end
     (≈151.37 s) — no gap at any 6 s segment boundary.
+- **2026-11-27 (CI simplified: test jobs + dist jobs publishing binaries, .debs
+  and a static apt repo on GitHub Pages):** The workflow is now
+  `pure-go` (vet+test) · `bindings` (bun test+typecheck) · `dist-amd64`
+  (native build, `make vet`+`make test`, `test-stream.sh`,
+  `integration-smoke.sh`, .deb) · `dist-arm64` (cross-compile, **qemu-user
+  `--dry-run` smoke** — boot + CERALIVE SHA guard + contract check, since
+  full pipelines are too slow under emulation, .deb) · `package-repo`
+  (push to main only). Each dist job uploads `ctrlirl-coder-<arch>`
+  (deb + binary + CERALIVE lib + build.json) and contributes its .deb to a
+  shared `ctrlirl-coder-debs` artifact. `package-repo` indexes both .debs
+  with `dpkg-scanpackages`, writes an **unsigned** apt `Release` file, and
+  deploys `site/` to GitHub Pages:
+  `deb [trusted=yes] https://majklovec.github.io/ctrlirl-coder/deb/dists
+  main`. Package version is `0.9.<github-run-number>-1` (strictly newer
+  every push, so `apt upgrade` tracks main); `build-deb.sh --version`
+  carries it. Requires one-time repo Settings → Pages → Source = GitHub
+  Actions. `install.sh` also gained `gstreamer1.0-x` (textoverlay).
 - **2026-11-26 (CI fixes: apt package, relative cgo paths, bun test flakiness):**
   Three CI failures on `ubuntu-latest` (Ubuntu 26.04 "resolute"):
     - **`gstreamer1.0-tools-good` no longer exists** in Ubuntu 26.04 (same as
