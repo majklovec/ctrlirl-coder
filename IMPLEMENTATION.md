@@ -842,8 +842,15 @@ Still open:
   `deb [trusted=yes] https://majklovec.github.io/ctrlirl-coder/deb/dists
   main`. Package version is `0.9.<github-run-number>-1` (strictly newer
   every push, so `apt upgrade` tracks main); `build-deb.sh --version`
-  carries it. Requires one-time repo Settings → Pages → Source = GitHub
-  Actions. `install.sh` also gained `gstreamer1.0-x` (textoverlay).
+  carries it. Pages was enabled via API
+  (`POST /repos/…/pages`, `build_type=workflow`). `install.sh` also gained
+  `gstreamer1.0-x` (textoverlay). First-run follow-ups: the other two
+  1080p60 SwiftShader perf tests (`TestBrowser60FPSFeedSmooth` /
+  `TestBrowser60FPSRecoversAfterStatic`, via the shared
+  `probeBrowserFeed` helper) now skip under `CI` like the smoothness
+  probe, and `qemu-user-static` (arm64 dry-run smoke) is installed
+  best-effort — it has no candidate on the 26.04 runner image (universe),
+  so the smoke step no-ops when qemu is absent.
 - **2026-11-26 (CI fixes: apt package, relative cgo paths, bun test flakiness):**
   Three CI failures on `ubuntu-latest` (Ubuntu 26.04 "resolute"):
     - **`gstreamer1.0-tools-good` no longer exists** in Ubuntu 26.04 (same as
