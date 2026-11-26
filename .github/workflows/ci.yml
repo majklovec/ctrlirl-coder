@@ -46,7 +46,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             gcc g++ cmake pkg-config git \
             libglib2.0-dev libgnutls28-dev \
-            gstreamer1.0-dev gstreamer1.0-tools \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-tools \
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad \
             gstreamer1.0-libav
@@ -83,7 +84,8 @@ jobs:
             cmake pkg-config git \
             libglib2.0-dev:arm64 \
             libgnutls28-dev:arm64 \
-            libgstreamer1.0-dev:arm64
+            libgstreamer1.0-dev:arm64 \
+            libgstreamer-plugins-base1.0-dev:arm64
       - name: Build CERALIVE SRT bundle (arm64 cross)
         run: bash scripts/build-ceralive-srt.sh --arch arm64 --out .build/ceralive-srt/arm64
       - name: Cross-compile arm64 binary against the fork

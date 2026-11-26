@@ -75,7 +75,8 @@ dist: dist-amd64 dist-arm64
 ## the runtime lib next to the binary ($ORIGIN rpath). cgo: needs GStreamer dev
 ## headers + the CERALIVE build deps (cmake, c++, gnuTLS dev).
 dist-amd64: | bundle-amd64
-	@sha=$$(sed -n 's/.*"lib_sha256": "\([0-9a-f]*\)".*/\1/p' $(BUNDLE_JSON)); \
+	@set -e; \
+	sha=$$(sed -n 's/.*"lib_sha256": "\([0-9a-f]*\)".*/\1/p' $(BUNDLE_JSON)); \
 	src=$$(sed -n 's/.*"source_sha": "\([0-9a-f]*\)".*/\1/p' $(BUNDLE_JSON)); \
 	if [ -z "$$sha" ] || [ -z "$$src" ]; then echo "CERALIVE bundle identity missing; run: make bundle-amd64" >&2; exit 1; fi; \
 	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
@@ -118,7 +119,8 @@ deb-arm64:
 ## since the srt package links the fork). The test binary embeds the same
 ## CERALIVE identity as the dist binary so the runtime backend guard passes.
 test: | bundle-amd64
-	@sha=$$(sed -n 's/.*"lib_sha256": "\([0-9a-f]*\)".*/\1/p' $(BUNDLE_JSON)); \
+	@set -e; \
+	sha=$$(sed -n 's/.*"lib_sha256": "\([0-9a-f]*\)".*/\1/p' $(BUNDLE_JSON)); \
 	src=$$(sed -n 's/.*"source_sha": "\([0-9a-f]*\)".*/\1/p' $(BUNDLE_JSON)); \
 	if [ -z "$$sha" ] || [ -z "$$src" ]; then echo "CERALIVE bundle identity missing; run: make bundle-amd64" >&2; exit 1; fi; \
 	CGO_ENABLED=1 CGO_CFLAGS="$(CERALIVE_CGO_CFLAGS)" \

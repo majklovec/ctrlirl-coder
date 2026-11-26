@@ -833,6 +833,19 @@ Still open:
       bookworm, noted above) — `apt-get` exit 100 killed the GStreamer tier. The
       gstreamer tier now installs only `gstreamer1.0-tools` (provides
       `gst-launch-1.0`, all the stream/integration scripts need).
+    - **GStreamer *dev* headers missing from CI apt lines** (second run): the
+      tiers installed `gstreamer1.0-dev` (the runtime lib, no `.pc` files)
+      instead of the dev packages, so cgo's pkg-config probes failed with
+      `Package 'gstreamer-1.0' not found` (amd64) and
+      `Package 'gstreamer-app-1.0' not found` (arm64, which also lacked
+      `libgstreamer-plugins-base1.0-dev:arm64`). Fixed to
+      `libgstreamer1.0-dev` (+ `libgstreamer-plugins-base1.0-dev` on arm64),
+      matching the Makefile header prerequisites.
+    - **Makefile swallowed `go build` failures:** the `dist-amd64` (and `test`)
+      recipes chained commands with `;`, so a failed `go build` fell through to
+      the `cp` steps and the real error was masked by
+      `cp: cannot create regular file 'bin/…'`. Recipes now run under
+      `set -e`.
     - **Relative cgo paths broken arm64 cross-compile:** the CI
       `cross-arm64` job's inline go build used `BUNDLE=.build/ceralive-srt/arm64`
       with `CGO_CFLAGS="-I$BUNDLE/include"` / `CGO_LDFLAGS="-L$BUNDLE/lib …"`.
