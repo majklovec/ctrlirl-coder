@@ -1,0 +1,210 @@
+name: Release
+
+on:
+    push:
+        branches: [main]
+    workflow_dispatch: {}
+
+permissions:
+    contents: write
+
+jobs:
+    # Semantic versioning: analyzes conventional commits since the last tag
+    # and, when a bump is warranted, prepends the notes to CHANGELOG.md,
+    # commits it, and publishes the tag + GitHub release.
+    version:
+        runs-on: ubuntu-latest
+        outputs:
+            new_tag: ${{ steps.semver.outputs.new_tag }}
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  fetch-depth: 0
+
+            - uses: actions/setup-node@v7
+              with:
+                  node-version: 22
+
+            - name: Install semantic-release + plugins
+              shell: bash
+              run: |
+                  npm install --no-save \
+                      semantic-release@24 \
+                      @semantic-release/changelog \
+                      @semantic-release/git \
+                      @semantic-release/github
+
+            - name: Semantic versioning (semantic-release)
+              id: semver
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  npx --yes semantic-release@24
+
+                  # Detect whether this push was released: semantic-release
+                  # tags HEAD.
+                  git fetch --force --tags
+                  TAG="$(git describe --tags --abbrev=0 HEAD 2>/dev/null || true)"
+                  if [ -n "$TAG" ] && [ "$(git rev-parse "$TAG^{commit}")" = "$(git rev-parse HEAD)" ]; then
+                    echo "new_tag=${TAG}" >> "$GITHUB_OUTPUT"
+                  fi
+
+    # Native amd64: build the CERALIVE SRT bundle + binary, run the full test
+    # suite (go test, SRT stream, integration smoke), build the .deb.
+    dist-amd64:
+        needs: version
+        if: needs.version.outputs.new_tag != ''
+        runs-on: ubuntu-latest
+        env:
+            # Debs carry the release version (tag includes the v prefix;
+            # build-deb.sh strips it and appends the -1 dpkg revision).
+            DEB_VERSION: ${{ needs.version.outputs.new_tag }}
+        steps:
+            # Check out the release tag, not the trigger commit: the
+            # `version` job commits the CHANGELOG bump, so the tag points
+            # one commit ahead of the push that triggered this run.
+            - uses: actions/checkout@v7
+              with:
+                  ref: ${{ needs.version.outputs.new_tag }}
+
+            - uses: actions/setup-go@v5
+              with:
+                  go-version: "1.26"
+                  cache: false
+
+            - name: Install GStreamer dev + plugins + CERALIVE build deps
+              run: |
+                sudo apt-get update
+                sudo apt-get install -y --no-install-recommends \
+                  gcc g++ cmake pkg-config git dpkg-dev \
+                  libglib2.0-dev libgnutls28-dev \
+                  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+                  gstreamer1.0-tools \
+                  gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+                  gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad \
+                  gstreamer1.0-libav gstreamer1.0-x
+            - name: Build binary (CERALIVE bundle + embedded identity)
+              run: make dist-amd64
+            - name: Vet + test (full suite against the fork)
+              run: |
+                make vet
+                make test
+            - name: SRT stream test (full pipeline vs local listener)
+              run: bash scripts/test-stream.sh
+            - name: Integration smoke (layered + full pipelines vs local srtsrc)
+              run: bash scripts/integration-smoke.sh
+            - name: Build amd64 .deb
+              run: bash scripts/build-deb.sh --arch amd64 --version "${DEB_VERSION#v}"
+            - name: Upload amd64 artifacts
+              uses: actions/upload-artifact@v7
+              with:
+                name: ctrlirl-coder-amd64
+                path: |
+                  dist/ctrlirl-coder_*_amd64.deb
+                  bin/ctrlirl-coder-linux-amd64
+                  bin/libsrt.so.1.5
+                  bin/build.json
+
+    # arm64 cross-compile: build the CERALIVE fork for arm64, cross-compile
+    # the cgo binary against it, smoke it under qemu-user when available,
+    # build the .deb.
+    dist-arm64:
+        needs: version
+        if: needs.version.outputs.new_tag != ''
+        runs-on: ubuntu-latest
+        env:
+            DEB_VERSION: ${{ needs.version.outputs.new_tag }}
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  ref: ${{ needs.version.outputs.new_tag }}
+
+            - uses: actions/setup-go@v5
+              with:
+                  go-version: "1.26"
+                  cache: false
+
+            - name: Install arm64 cross toolchain + GStreamer + gnuTLS multiarch dev
+              run: |
+                sudo dpkg --add-architecture arm64
+                sudo apt-get update
+                sudo apt-get install -y --no-install-recommends \
+                  gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+                  binutils-aarch64-linux-gnu \
+                  cmake pkg-config git dpkg-dev \
+                  libglib2.0-dev:arm64 \
+                  libgnutls28-dev:arm64 \
+                  libgstreamer1.0-dev:arm64 \
+                  libgstreamer-plugins-base1.0-dev:arm64
+                # qemu is optional: only the dry-run smoke needs it (universe
+                # availability varies across runner images).
+                sudo apt-get install -y --no-install-recommends qemu-user-static \
+                  || echo "warn: qemu-user-static unavailable; smoke will be skipped"
+            - name: Build CERALIVE SRT bundle (arm64 cross)
+              run: bash scripts/build-ceralive-srt.sh --arch arm64 --out "$PWD/.build/ceralive-srt/arm64"
+            - name: Cross-compile arm64 binary against the fork
+              run: |
+                # Absolute paths: cgo compiles in a temp dir, so relative
+                # -I/-L would resolve nowhere (srt/srt.h: not found).
+                BUNDLE="$PWD/.build/ceralive-srt/arm64"
+                sha=$(sed -n 's/.*"lib_sha256": "\([0-9a-f]*\)".*/\1/p' "$BUNDLE/build.json")
+                src=$(sed -n 's/.*"source_sha": "\([0-9a-f]*\)".*/\1/p' "$BUNDLE/build.json")
+                CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
+                  PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
+                  CGO_CFLAGS="-I$BUNDLE/include" \
+                  CGO_LDFLAGS="-L$BUNDLE/lib -lsrt -Wl,-rpath,\$$ORIGIN -Wl,--enable-new-dtags" \
+                  go build -ldflags "-X ctrlirl-coder/internal/sinks/srt.ceraliveLibSHA256=$sha -X ctrlirl-coder/internal/sinks/srt.ceraliveSourceSHA=$src" \
+                  -o bin/ctrlirl-coder-linux-arm64 ./cmd/ctrlirl-coder
+                libfile=$(sed -n 's/.*"lib_file": "\([^"]*\)".*/\1/p' "$BUNDLE/build.json"); cp "$BUNDLE/$libfile" bin/arm64-libsrt.so.1.5
+                cp "$BUNDLE/build.json" bin/arm64-build.json
+            - name: Smoke test under qemu-user (boot, CERALIVE guard, contract)
+              run: |
+                if ! command -v qemu-aarch64-static >/dev/null 2>&1; then
+                  echo "qemu-user-static not available; skipping dry-run smoke"
+                  exit 0
+                fi
+                cp bin/arm64-libsrt.so.1.5 bin/libsrt.so.1.5
+                qemu-aarch64-static -L /usr/aarch64-linux-gnu \
+                  ./bin/ctrlirl-coder-linux-arm64 \
+                  --config config.toml \
+                  --pipeline pipeline/example-full.pipeline \
+                  --scene scene.example.json \
+                  --dry-run
+            - name: Build arm64 .deb
+              run: bash scripts/build-deb.sh --arch arm64 --version "${DEB_VERSION#v}"
+            - name: Verify .deb contents
+              run: |
+                deb=$(ls dist/ctrlirl-coder_*_arm64.deb)
+                dpkg-deb -I "$deb"
+                dpkg-deb -c "$deb"
+            - name: Upload arm64 artifacts
+              uses: actions/upload-artifact@v7
+              with:
+                name: ctrlirl-coder-arm64
+                path: |
+                  dist/ctrlirl-coder_*_arm64.deb
+                  bin/ctrlirl-coder-linux-arm64
+                  bin/arm64-libsrt.so.1.5
+                  bin/arm64-build.json
+
+    # Attach the per-arch payloads (debs + binaries + CERALIVE lib) to the
+    # GitHub release. The release body is already set by semantic-release
+    # (the conventional-commit changelog); this step only adds files.
+    release:
+        needs: [version, dist-amd64, dist-arm64]
+        if: needs.version.outputs.new_tag != ''
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/download-artifact@v8
+              with:
+                  path: artifacts
+                  pattern: ctrlirl-coder-*
+                  merge-multiple: true
+
+            - name: Create / update release
+              uses: softprops/action-gh-release@v3
+              with:
+                  tag_name: ${{ needs.version.outputs.new_tag }}
+                  name: Release ${{ needs.version.outputs.new_tag }}
+                  files: artifacts/*
+                  token: ${{ secrets.GITHUB_TOKEN }}

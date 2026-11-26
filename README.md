@@ -149,22 +149,26 @@ make deb-arm64
 
 (Without the toolchain it falls back to a docker buildx image, emulated.)
 
-### Installing from the deb package repo (published on every push to `main`)
+### Installing from a release .deb
 
-CI publishes `amd64` + `arm64` `.deb` builds to a static apt repository on
-GitHub Pages (unsigned — add it with `[trusted=yes]`):
+Every semantic release ships per-arch `.deb` builds as
+[GitHub Releases](https://github.com/majklovec/ctrlirl-coder/releases) assets
+(`ctrlirl-coder_<version>_<arch>.deb`):
 
 ```sh
-echo "deb [trusted=yes] https://majklovec.github.io/ctrlirl-coder/deb/dists main" \
-  | sudo tee /etc/apt/sources.list.d/ctrlirl-coder.list
+wget -qO ctrlirl-coder.deb \
+  https://github.com/majklovec/ctrlirl-coder/releases/download/v<version>/ctrlirl-coder_<version>_amd64.deb
 sudo apt-get update
-sudo apt-get install ctrlirl-coder
+sudo apt-get install -y ./ctrlirl-coder.deb
 ```
 
-Version is `0.9.<github-run-number>-1`, so each push to `main` is a strictly
-newer package: `sudo apt-get upgrade ctrlirl-coder` tracks the latest build.
-Per-run binaries + libsrt + `.deb` are also available as GitHub Actions
-artifacts (`ctrlirl-coder-amd64` / `ctrlirl-coder-arm64`).
+`apt` resolves the rest from the archive: `libceralive-srt-1.5` (the CERALIVE
+`libsrt` fork — co-installed from the same release if needed) and all GStreamer
+runtime plugins.
+
+Versioning: releases are cut automatically on `main` from conventional commits
+(semantic-release): `feat:` = minor, `fix:` = patch, `feat!:` / `BREAKING
+CHANGE` = major. `CHANGELOG.md` is maintained by the release workflow.
 
 ```sh
 make deb

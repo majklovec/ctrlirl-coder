@@ -850,7 +850,34 @@ Still open:
   `probeBrowserFeed` helper) now skip under `CI` like the smoothness
   probe, and `qemu-user-static` (arm64 dry-run smoke) is installed
   best-effort — it has no candidate on the 26.04 runner image (universe),
-  so the smoke step no-ops when qemu is absent.
+  so the smoke step no-ops when qemu is absent. **The Pages repo part of
+  this was later removed** ("no need of github pages") — see the entry
+  below.
+- **2026-11-27 (semantic-release versioning + changelog + GitHub
+  Release; Pages apt repo removed):** `version` → `dist-{amd64,arm64}` →
+  `release` pipeline in `.github/workflows/release.yml`, modeled on the
+  `app` repo's flow:
+    - **`version`** (main pushes only): `npm i --no-save
+      semantic-release@24 @semantic-release/changelog
+      @semantic-release/git @semantic-release/github`, runs it with
+      `.releaserc.json` (commit-analyzer, notes generator, changelog →
+      `CHANGELOG.md`, git commit of the bump, `@semantic-release/github`
+      for tag + release draft). Emits `new_tag` when the tag lands on
+      HEAD. No `@semantic-release/npm` — no root `package.json`.
+    - **`dist-amd64` / `dist-arm64`** (only on release): check out
+      `${{ needs.version.outputs.new_tag }}`, **not** the trigger commit —
+      semantic-release's `chore(release)` commit moves HEAD past the push
+      (`[skip ci]` stops that commit re-triggering CI). Build/test/deb
+      steps unchanged; deb version = tag (`v` stripped by
+      `build-deb.sh`, `-1` revision appended); artifacts are the
+      release payloads.
+    - **`release`**: downloads both payload artifacts, attaches them to
+      the semantic-release draft via
+      `softprops/action-gh-release@v3` (body already = changelog; files
+      = debs, binaries, CERALIVE libs, build.json).
+  `CHANGELOG.md` seeded with a manual `0.0.0` entry; semantic-release
+  prepends from the first tag onward. Conventional commits drive semver:
+  `feat:` minor, `fix:` patch, `!`/`BREAKING CHANGE` major.
 - **2026-11-26 (CI fixes: apt package, relative cgo paths, bun test flakiness):**
   Three CI failures on `ubuntu-latest` (Ubuntu 26.04 "resolute"):
     - **`gstreamer1.0-tools-good` no longer exists** in Ubuntu 26.04 (same as
