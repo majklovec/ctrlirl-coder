@@ -873,8 +873,15 @@ Still open:
       release payloads.
     - **`release`**: downloads both payload artifacts, attaches them to
       the semantic-release draft via
-      `softprops/action-gh-release@v3` (body already = changelog; files
-      = debs, binaries, CERALIVE libs, build.json).
+      `softprops/action-gh-release@v3` (body already = changelog).
+      Release assets per arch: `.deb` + `ctrlirl-coder-<ver>-linux-<arch>.tar.gz`
+      (binary + `libsrt.so.1.5` + `build.json`), so both compiled executables
+      and the Debian packages are always on the release page.
+  First release run (v1.0.0) hit a real test flake:
+  `TestRotateTransparentCorners` (added externally for the rotate-alpha fix)
+  timed out waiting for the first appsink frame on the 2 vCPU runner
+  (0.21 s locally) — its 5 s deadline is now 30 s. The empty v1.0.0 release
+  was deleted so the next run re-cuts it.
   `CHANGELOG.md` seeded with a manual `0.0.0` entry; semantic-release
   prepends from the first tag onward. Conventional commits drive semver:
   `feat:` minor, `fix:` patch, `!`/`BREAKING CHANGE` major.

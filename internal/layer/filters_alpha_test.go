@@ -118,10 +118,13 @@ func TestRotateTransparentCorners(t *testing.T) {
 		t.Fatalf("pipeline failed to start: %v", err)
 	}
 
+	// 30 s: a 2 vCPU CI runner under GStreamer load has been observed to
+	// need far longer than the 5 s this once used to allow before the
+	// first frame; locally the frame arrives in well under a second.
 	var frame []byte
 	select {
 	case frame = <-firstFrame:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		cancel()
 		base.SetState(gst.StateNull)
 		t.Fatal("timed out waiting for a frame from the appsink")

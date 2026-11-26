@@ -84,17 +84,8 @@ jobs:
         run: bash scripts/test-stream.sh
       - name: Integration smoke (layered + full pipelines vs local srtsrc)
         run: bash scripts/integration-smoke.sh
-      - name: Build amd64 .deb
-        run: bash scripts/build-deb.sh --arch amd64 --version "$DEB_VERSION"
-      - name: Upload amd64 artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ctrlirl-coder-amd64
-          path: |
-            dist/ctrlirl-coder_*_amd64.deb
-            bin/ctrlirl-coder-linux-amd64
-            bin/libsrt.so.1.5
-            bin/build.json
+      # No .deb / artifact publish here: releases ship binaries + .debs via
+      # the Release workflow (softprops/action-gh-release).
   # arm64 cross-compile: build the CERALIVE fork for arm64, cross-compile the
   # cgo binary against it, smoke it under qemu-user, build the .deb, publish.
   dist-arm64:
@@ -159,19 +150,5 @@ jobs:
             --pipeline pipeline/example-full.pipeline \
             --scene scene.example.json \
             --dry-run
-      - name: Build arm64 .deb
-        run: bash scripts/build-deb.sh --arch arm64 --version "$DEB_VERSION"
-      - name: Verify .deb contents
-        run: |
-          deb=$(ls dist/ctrlirl-coder_*_arm64.deb)
-          dpkg-deb -I "$deb"
-          dpkg-deb -c "$deb"
-      - name: Upload arm64 artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ctrlirl-coder-arm64
-          path: |
-            dist/ctrlirl-coder_*_arm64.deb
-            bin/ctrlirl-coder-linux-arm64
-            bin/arm64-libsrt.so.1.5
-            bin/arm64-build.json
+      # No .deb / artifact publish here: releases ship binaries + .debs via
+      # the Release workflow (softprops/action-gh-release).
