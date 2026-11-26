@@ -1,3 +1,10 @@
+## [1.0.2](https://github.com/majklovec/ctrlirl-coder/compare/v1.0.1...v1.0.2) (2026-11-26)
+
+
+### Bug Fixes
+
+* **ci:** 30s frame deadline for rotate-corners test, release ships binaries+debs both arches; v1.0.0 re-cut ([d292942](https://github.com/majklovec/ctrlirl-coder/commit/d2929423e424304af7fe85a95db18b25f69bca6d))
+
 ## [1.0.1](https://github.com/majklovec/ctrlirl-coder/compare/v1.0.0...v1.0.1) (2026-11-26)
 
 
