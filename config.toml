@@ -1,0 +1,84 @@
+# CtrlIRL-Coder configuration (TOML).
+#
+# Table names and key names mirror the original ctrlirl_coder.conf schema; only
+# the format changed (INI -> TOML), so values carry over directly.
+#
+# Live-reload: send SIGHUP to the process to re-read this file and re-diff
+# the scene.
+
+# Output path: "srt" (direct SRT socket to [srt].uri) or "srtla" (SRT Link
+# Aggregation over the [srtla].uplink_ips to a srtla_rec receiver).
+sink = "srt"
+
+[general]
+# Bitrate limits for the adaptive balancer (kbit/s).
+min_bitrate = 500
+max_bitrate = 6000
+# Balancer algorithm: "adaptive" | "fixed" | "aimd"
+balancer = "fixed"
+# Frame-production stall threshold (ms): no frame pulled from the terminal
+# appsink for this long flags a zombie-encode and drops the target to the
+# minimum bitrate (the original frame_liveness watchdog gate). 0 = 3000 ms.
+frame_stall_ms = 3000
+
+[srt]
+# Negotiated SRT latency (ms) — feeds the balancer's buffer-window math.
+latency = 120
+# Authoritative SRT destination (host:port). The pipeline template carries NO
+# SRT sink — it ends in the terminal appsink and the process owns the SRT
+# socket, so this is where the stream goes. Point it at a running SRT listener
+# (e.g. an OBS SRT Input source) before starting to see a stream.
+uri = "srt://127.0.0.1:9101"
+# streamid = "ctrlirl_coder"
+# passphrase = ""
+# Optional send-rate cap in kbit/s (SRTO_MAXBW). 0 = uncapped (SRT decides).
+# max_bandwidth_kbps = 0
+
+[srtla]
+# SRT link aggregation (bond several uplinks / 4G-5G modems into one SRT
+# stream). Used when sink = "srtla": the SRT client connects through an
+# ephemeral loopback relay; its datagrams are fanned out over uplink_ips to a
+# running srtla_rec or compatible SRTLA receiver. [srt] latency, streamid,
+# passphrase, and max_bandwidth_kbps apply; [srt] uri is not used.
+# receiver_host = "srtla.example.com"
+receiver_port = 5000
+# One local source IP per bonded uplink (binds a UDP socket to each).
+uplink_ips = []
+# Scheduler: "enhanced" (quality-aware, default) | "classic" (reference
+# srtla_send window selection).
+mode = "classic"
+# Uplink idle timeout before re-registration (ms).
+conn_timeout_ms = 5000
+
+[adaptive]
+# Per-decision step sizes (kbit/s) and minimum intervals between decisions (ms).
+incr_step = 30
+decr_step = 100
+incr_interval = 500
+decr_interval = 200
+
+[aimd]
+incr_step = 100
+decr_mult = 0.5
+incr_interval = 1000
+decr_interval = 100
+
+[overlay]
+enabled = true
+interval_ms = 1000
+# format = "  b: %5d/%5.0f rtt: %3d/%3d/%3d bs: %3d/%3d/%3d/%3d"
+
+[pipeline]
+# gst-launch-style template. The terminal must be appsink name=appsink.
+template = "pipeline/example-full.pipeline"
+
+[control]
+# Optional shared HTTP API: one listener carrying the JSON-RPC 2.0
+# control API (POST /rpc) and the /metrics endpoint (GET /metrics,
+# Prometheus text exposition format).
+# The --api-addr flag overrides this.
+addr = "0.0.0.0:8899"
+
+[scene]
+# Optional JSON scene descriptor for the multi-layer compositor.
+# config_path = "scene.example.json"

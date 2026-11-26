@@ -1,0 +1,47 @@
+# CtrlIRL-Coder pipeline template — full contract (MPEG-TS).
+#
+# The pipeline encodes video (H.264) + audio (AAC) and muxes them to MPEG-TS.
+# It ends in the terminal `appsink name=appsink` — the exact contract of the
+# original ctrlirl_coder/belacoder. ctrlirl-coder pulls it with
+# gst_app_sink_pull_sample (Go, internal/gstpull) and sends the TS bytes over
+# SRT itself (the Go-owned SRT socket — see internal/srt). There is NO
+# in-pipeline SRT sink; the destination comes from config.toml [srt] uri.
+#
+# The appsink is also the stats surface for the adaptive bitrate controller:
+# pulled-frame liveness (stall detection), encoded throughput, caps framerate.
+# Backpressure: drop=true (forced by the contract check) — a stalled SRT send
+# path makes the sink drop buffers, never wedges the pipeline.
+#
+# Contract elements present:
+#   appsink   — terminal sink the pipeline ends in (MANDATORY; Go pulls +
+#               sends SRT; appsink stats feed the adaptive balancer)
+#   venc_kbps — x264enc, `bitrate` property in kbit/s (NAME is the contract)
+#   overlay   — textoverlay for live stats
+#   mux       — mpegtsmux (TS multiplex of video + audio)
+#
+# h264parse with config-interval=1 pushes SPS/PPS at the start / every keyframe
+# so a TS receiver connecting mid-stream (OBS) can decode immediately.
+#
+# To stream, point [srt] uri in config.toml at a running SRT listener, e.g. an
+# OBS SRT Input source on srt://127.0.0.1:7000, or a local capture for a smoke
+# test:
+#   gst-launch-1.0 srtsrc uri=srt://:9101 mode=listener ! fakesink
+
+videotestsrc is-live=true pattern=smpte
+  ! video/x-raw,width=1920,height=1080,framerate=30/1
+  ! videoconvert
+  ! textoverlay text="init" valignment=top halignment=right font-desc="Monospace 24" name=overlay
+  ! queue
+  ! videoconvert
+  ! video/x-raw,format=I420
+  ! x264enc speed-preset=superfast tune=zerolatency bitrate=6000 key-int-max=30 name=venc_kbps
+  ! h264parse config-interval=1
+  ! mux.
+audiotestsrc is-live=true wave=sine freq=440
+  ! audio/x-raw,rate=48000,channels=2
+  ! audioconvert
+  ! voaacenc bitrate=128000
+  ! aacparse
+  ! mux.
+mpegtsmux name=mux
+  ! appsink name=appsink

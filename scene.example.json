@@ -1,0 +1,56 @@
+{
+  "name": "example-two-layer",
+  "canvas": { "width": 1280, "height": 720 },
+  "layers": [
+    {
+      "id": "main",
+      "type": "video",
+      "source": "/dev/video0",
+      "properties": {
+        "zorder": 1,
+        "xpos": 0,
+        "ypos": 0,
+        "width": 1280,
+        "height": 720,
+        "alpha": 1.0
+      },
+      "filters": [
+        { "kind": "videocrop", "params": { "top": 24, "bottom": 24 } },
+        { "kind": "videobalance", "params": { "brightness": 0.05, "saturation": 1.1 } }
+      ]
+    },
+    {
+      "id": "logo",
+      "type": "image",
+      "source": "logo.png",
+      "properties": {
+        "zorder": 10,
+        "xpos": 16,
+        "ypos": 16,
+        "width": 128,
+        "height": 128,
+        "alpha": 0.9
+      }
+    },
+    {
+      "id": "browser",
+      "type": "browser",
+      "source": "https://example.com",
+      "properties": {
+        "zorder": 5,
+        "xpos": 640,
+        "ypos": 480,
+        "width": 640,
+        "height": 240,
+        "alpha": 1.0,
+        "framerate": 30,
+        "quality": 75
+      },
+      "filters": [
+        { "kind": "videoflip", "params": { "direction": "horizontal" } },
+        { "kind": "volume", "params": { "volume": 0.8 } },
+        { "kind": "equalizer", "params": { "bands": 3, "band0": 1.5 } }
+      ]
+    }
+  ]
+}

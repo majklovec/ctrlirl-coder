@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Bouncing Line — smoothness test</title>
+  <style>
+    html, body { margin: 0; padding: 0; background: #000; overflow: hidden; }
+    canvas { display: block; background: #050505; }
+    #hud {
+      position: fixed; top: 8px; left: 8px; color: #6cf;
+      font: 16px/1.4 monospace; white-space: pre; pointer-events: none;
+      text-shadow: 0 0 4px #000;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c" width="1920" height="1080"></canvas>
+  <div id="hud"></div>
+  <script>
+    // A single bright vertical line bounces left<->right across the frame at a
+    // constant px/frame STEP, driven by a frame counter (deterministic, vsync-
+    // locked by requestAnimationFrame). One full sweep is (W-2*pad)/2*2 frames.
+    //
+    // The HUD shows the current frame index and a 60Hz tick meter so the
+    // smoothness is visible to the eye: on a smooth 60fps capture the line
+    // glides, and the tick dot advances steadily; on a choppy capture the line
+    // visibly stutters / teleports and the tick meter jumps.
+    const W = 1920, H = 1080;
+    const ctx = document.getElementById('c').getContext('2d');
+    const hud = document.getElementById('hud');
+
+    const STEP = 8;      // px per rendered frame
+    const PAD = 8;       // left/right margin
+    const LO = PAD, HI = W - PAD;
+    // Bounce: triangle wave over [LO, HI].
+    function bounceStep(i) {
+      const period = 2 * (HI - LO);
+      let t = (i * STEP) % period;
+      if (t < 0) t += period;
+      return t <= (HI - LO) ? LO + t : HI - (t - (HI - LO));
+    }
+
+    let frame = 0;
+    let lastHud = 0;
+
+    function tick() {
+      frame++;
+      const x = bounceStep(frame);
+
+      ctx.fillStyle = '#050505';
+      ctx.fillRect(0, 0, W, H);
+
+      // Faint 100px ruler so small motion increments are visible.
+      ctx.fillStyle = 'rgba(80,120,160,0.25)';
+      for (let gx = 0; gx < W; gx += 100) ctx.fillRect(gx, H - 24, 1, 24);
+
+      // The bouncing line.
+      ctx.fillStyle = '#f0f';
+      ctx.fillRect(Math.round(x) - 3, 0, 6, H);
+
+      // Render counter: `frame % 20` filled cells in a top-left row. The probe
+      // counts the lit cells per captured frame, tracks roll-over, and divides
+      // by wall time to measure how many rAF frames the BROWSER rendered per
+      // second — the true render cadence from the same source that drives the
+      // line (no external sync).
+      const NCELLS = 20;
+      const on = frame % NCELLS;
+      for (let i = 0; i < NCELLS; i++) {
+        ctx.fillStyle = i < on ? '#f0f' : '#101010';
+        ctx.fillRect(16 + i * 14, 16, 12, 10);
+      }
+
+      // HUD: frame index + a 60Hz tick meter (one cell per frame, wraps at 60).
+      const now = performance.now();
+      if (now - lastHud > 100) {
+        lastHud = now;
+        const cell = frame % 60;
+        hud.textContent =
+          'frame ' + frame +
+          '\nx=' + x.toFixed(1) +
+          '\n60Hz |' + ' '.repeat(Math.max(0, cell - 1)) + (cell ? '█' : '') + ' '.repeat(60 - cell) + '|';
+      }
+      requestAnimationFrame(tick);
+    }
+    tick();
+  </script>
+</body>
+</html>

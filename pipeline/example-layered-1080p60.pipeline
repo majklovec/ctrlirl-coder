@@ -1,0 +1,38 @@
+# CtrlIRL-Coder pipeline template — multi-layer compositor, 1920x1080 @ 60fps
+# (MPEG-TS).
+#
+# Layers (see a FullHD scene definition) feed the `compositor` element; this
+# template has no upstream source of its own. The composited frames are
+# encoded + audio-muxed to MPEG-TS and end in the same terminal sink as
+# example-full.pipeline: `appsink name=appsink`, which ctrlirl-coder pulls
+# (gst_app_sink_pull_sample) and sends over SRT (destination from config.toml
+# [srt] uri). The appsink is also the stats surface for the adaptive bitrate
+# controller (frame liveness, encoded throughput, caps framerate).
+#
+# This is the FullHD twin of example-layered.pipeline: same contract elements,
+# caps pinned to 1920x1080 @ 60fps. Use it with 1080p60 scenes + a 60fps OBS;
+# keep example-layered-1080p30.pipeline for 1080p30 and
+# example-layered.pipeline for 720p30 scenes.
+#
+# Contract elements:
+#   compositor — multi-layer scene (layers attached via sink_%d pads)
+#   appsink    — terminal sink (MANDATORY; Go pulls + sends SRT)
+#   venc_kbps  — x264enc encoder (bitrate property in kbit/s)
+#   mux        — mpegtsmux (browser layers attach their page audio here)
+
+# IMPORTANT: the caps after the compositor MUST pin format + width + height +
+# framerate to the scene size. The compositor (GStreamer 1.28) resolves its
+# output caps from upstream video info at negotiate time; with a live appsrc
+# frontend that info is not ready during preroll, so a bare `format=I420`
+# (or any non-pinning caps) makes the compositor lock to its 1x1 default and
+# the encoder never receives a frame. A scene larger than the pin gets squashed
+# into it (a 1080p scene behind the 720p pin streams as a 1280x720 block).
+# Keep width/height/framerate in sync with the scene definition.
+compositor name=compositor background=black
+  ! videoconvert
+  ! video/x-raw,format=I420,width=1920,height=1080,framerate=60/1
+  ! x264enc speed-preset=superfast tune=zerolatency bitrate=6000 key-int-max=60 name=venc_kbps
+  ! h264parse config-interval=1
+  ! mux.
+mpegtsmux name=mux
+  ! appsink name=appsink

@@ -1,0 +1,80 @@
+# ctrlirl_coder configuration file
+#
+# Reload while running with: kill -HUP $(pidof ctrlirl_coder)
+
+# Output path: srt (direct SRT socket to [srt].uri) | srtla (SRT Link
+# Aggregation over [srtla] uplinks to a srtla_rec receiver)
+sink = "srt"
+
+[general]
+# Bitrate limits (Kbps)
+# Examples: 500 = 500 Kbps, 6000 = 6 Mbps, 12000 = 12 Mbps
+min_bitrate = 500
+max_bitrate = 6000
+
+# Balancer algorithm - controls how bitrate adapts to network conditions
+# Options:
+#   adaptive - RTT and buffer-based control, reacts to congestion (default)
+#   fixed    - Constant bitrate, no adaptation (uses max_bitrate)
+#   aimd     - TCP-style Additive Increase Multiplicative Decrease
+balancer = "adaptive"
+
+[srt]
+# SRT latency buffer (milliseconds)
+# Higher = more resilient to packet loss, but adds delay
+# Range: 100-10000, typical: 1500-3000 for mobile streaming
+latency = 2000
+
+# Note: stream_id is set via -s flag (not in config, rarely changes)
+
+# Optional send-rate cap in kbit/s (SRTO_MAXBW). 0 = uncapped (SRT decides).
+# max_bandwidth_kbps = 0
+
+[srtla]
+# SRT link aggregation: bond several uplinks / 4G-5G modems into one SRT
+# stream. Used when sink = srtla: the SRT client connects through an ephemeral
+# loopback relay; its datagrams are fanned out over uplink_ips to a running
+# srtla_rec or compatible SRTLA receiver.
+# receiver_host = srtla.example.com
+receiver_port = 5000
+# One local source IP per bonded uplink, comma-separated.
+# uplink_ips = 192.168.1.10,10.0.0.5
+# Scheduler: enhanced (quality-aware, default) | classic (reference selection)
+mode = "enhanced"
+# Uplink idle timeout before re-registration (ms)
+conn_timeout_ms = 5000
+
+# ============================================================================
+# ALGORITHM TUNING
+#
+# These sections customize each algorithm's behavior.
+# All values are optional - defaults are used if omitted.
+# ============================================================================
+
+[adaptive]
+# Bitrate adjustment steps (Kbps)
+incr_step = 30          # Increase step when stable (default: 30)
+decr_step = 100         # Decrease step on congestion (default: 100)
+
+# Timing (milliseconds)
+incr_interval = 500     # Minimum ms between increases (default: 500)
+decr_interval = 200     # Minimum ms between decreases (default: 200)
+
+# Note: loss_threshold is not yet configurable
+
+[aimd]
+# AIMD-specific tuning
+incr_step = 50          # Additive increase step (Kbps, default: 50)
+decr_mult = 0.75        # Multiplicative decrease (0.0-1.0, default: 0.75)
+                        # 0.75 means reduce to 75% on congestion
+
+# Timing (milliseconds)
+incr_interval = 500     # Minimum ms between increases (default: 500)
+decr_interval = 200     # Minimum ms between decreases (default: 200)
+
+# [control] — shared HTTP API (see RPC.md): one listener carrying the
+# JSON-RPC 2.0 control API (POST /rpc) and /metrics (GET /metrics,
+# Prometheus text exposition format).
+# Empty / absent: no listener is created. The --api-addr flag overrides this.
+[control]
+# addr = "127.0.0.1:8899"

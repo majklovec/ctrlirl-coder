@@ -1,0 +1,24 @@
+[Unit]
+Description=CtrlIRL-Coder live SRT encoder
+After=network-online.target pulseaudio.service pipewire.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ctrlirl-coder --config /etc/ctrlirl-coder/config.toml
+# SIGHUP = reload config + re-diff scene (see the README)
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+# The CERALIVE libsrt sits next to the binary ($ORIGIN rpath); no library path
+# override is needed.
+Environment=CTRLIRL_CHROME_BIN=/usr/bin/chromium
+# Hardening: keep the binary able to read its own + config dirs.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/etc/ctrlirl-coder
+
+[Install]
+WantedBy=multi-user.target

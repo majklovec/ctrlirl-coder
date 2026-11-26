@@ -1,0 +1,20 @@
+# Runtime dependencies for the ctrlirl-coder .deb (Debian/Ubuntu package names).
+# The CERALIVE libsrt is BUNDLED into the package (no libsrt package exists), so
+# only the libsrt transitive runtime libs are needed here: gnutls + nettle.
+# GStreamer core/app come via the plugins packages; the binary NEEDEDs
+# libgstreamer/libgstapp/libgobject/libglib which those pull in.
+gstreamer1.0-tools
+gstreamer1.0-plugins-base
+gstreamer1.0-plugins-good
+gstreamer1.0-plugins-ugly
+gstreamer1.0-plugins-bad
+gstreamer1.0-libav
+# Pulse/GST plugin: bookworm ships the transitional gstreamer1.0-pulseaudio,
+# trixie+ ship gstreamer1.0-plugins-pulse — accept either.
+gstreamer1.0-pulseaudio|gstreamer1.0-plugins-pulse
+libpulse0
+pulseaudio-utils
+pipewire-pulse
+ca-certificates
+libgnutls30
+libnettle8

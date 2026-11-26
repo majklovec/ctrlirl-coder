@@ -1,0 +1,181 @@
+package compositor
+
+import (
+	"fmt"
+	"log/slog"
+
+	"github.com/go-gst/go-gst/pkg/gst"
+
+	"ctrlirl-coder/internal/gstutil"
+	"ctrlirl-coder/internal/sinks"
+)
+
+// checkContract implements the §2.1 startup validation. It runs after PAUSED
+// (names resolve only once parsed, §7.9). Missing optional elements are
+// logged, not fatal; a missing encoder disables adaptive bitrate; a missing
+// terminal `appsink` on a pipeline expected to stream is an error.
+//
+// It is called from New, before the command goroutine is handling commands;
+// reads of discovered fields (encoderName, bitrateUnits, tapEl, …) are safe
+// because New has completed.
+func (cp *CompositorPipeline) checkContract() {
+	// Encoder — exactly one of venc_bps / venc_kbps for adaptive bitrate.
+	if el := cp.pipeline.As().GetByName("venc_bps"); el != nil {
+		cp.vencEl, cp.encoderName = el, "venc_bps"
+	} else if el := cp.pipeline.As().GetByName("venc_kbps"); el != nil {
+		cp.vencEl, cp.encoderName = el, "venc_kbps"
+	} else {
+		slog.Error("pipeline: no encoder named venc_bps or venc_kbps; adaptive bitrate disabled")
+	}
+	if cp.encoderName != "" {
+		cp.bitrateUnits = sinks.EncoderUnits(cp.encoderName)
+		slog.Info("pipeline: encoder found", "name", cp.encoderName, "units", cp.bitrateUnits)
+	}
+
+	// Terminal appsink — the pipeline's terminal element, mandatory for SRT
+	// output (the original ctrlirl_coder/belacoder contract: an element named
+	// `appsink`, type appsink). Go pulls it with gst_app_sink_pull_sample and
+	// sends the bytes over the Go-owned SRT socket (see internal/gstpull);
+	// SRT is NOT sent in-pipeline.
+	if el := cp.pipeline.As().GetByName("appsink"); el != nil {
+		if gstutil.IsFactoryType(el, "appsink") {
+			cp.tapEl = el
+			// drop=false: the streaming thread MAY block on a slow drain —
+			// that backpressure is what makes VOD sources (HLS EXT-X-ENDLIST,
+			// local file) play at 1× real time instead of draining at network
+			// speed and hitting EOS in seconds. The 1×-paced Go drain (pacer)
+			// is the consumer; when it keeps up the appsink never fills. A
+			// live source that fills it (send stall) blocks the pipeline —
+			// a correct live behaviour, not a drop. The earlier seg1→seg2
+			// deadlock with drop=false came from the "live" GST_CONTEXT
+			// reaching the VOD hlsdemux2/soup source (whole-pipeline live,
+			// and — because contexts flow up the pad graph — live-marking
+			// even just the terminal appsink), which made the source
+			// unpauseable (a live source never yields to backpressure). The
+			// live context is now scoped to the audio-tail branch head only
+			// (Start), so the source branch stays VOD-pausable and
+			// backpressure works.
+			el.SetObjectProperty("drop", false)
+			// 600 buffers ≈ 20 s of TS packets at 6 Mbps. The default (200)
+			// fills within ~50 ms of sustained backpressure, so the
+			// CC-reset burst at every HLS segment boundary (~10 s) tips the
+			// queue over. 600 gives enough headroom that the burst is
+			// absorbed without a drop.
+			if err := gstutil.SetNumericProperty(el, "max-buffers", int64(600)); err != nil {
+				slog.Warn("pipeline: appsink max-buffers set failed", "err", err)
+			}
+			slog.Info("pipeline: terminal appsink found", "name", "appsink", "drop", false, "max-buffers", 600)
+		} else {
+			slog.Error("pipeline: element named appsink is not an appsink; this pipeline cannot stream over SRT")
+		}
+	} else {
+		slog.Error("pipeline: no element named appsink (terminal sink); this pipeline cannot stream over SRT")
+	}
+
+	// Mux — layer audio chains (browser layers) land on its sink_%d pads.
+	if el := cp.pipeline.As().GetByName("mux"); el != nil {
+		cp.muxEl = el
+		slog.Info("pipeline: mux found", "name", "mux")
+	} else {
+		slog.Warn("pipeline: no element named mux; browser layer audio is unavailable")
+	}
+
+	// Optional contract elements — informational.
+	if el := cp.pipeline.As().GetByName("compositor"); el != nil {
+		cp.compositor = el
+		slog.Info("pipeline: compositor found", "name", "compositor")
+	} else {
+		slog.Warn("pipeline: no compositor element; scene layers are unavailable")
+	}
+	if el := cp.pipeline.As().GetByName("overlay"); el != nil {
+		cp.overlayEl = el
+		if gstutil.IsFactoryType(el, "textoverlay") {
+			slog.Info("pipeline: textoverlay found", "name", "overlay")
+		} else {
+			slog.Warn("pipeline: overlay element found but is not a textoverlay; overlay updates skipped")
+		}
+	}
+	// Informational elements — presence is logged, no action taken.
+	for _, info := range [][2]string{
+		{"v_delay", "pipeline: v_delay present (A/V sync handle)"},
+		{"a_delay", "pipeline: a_delay present (A/V sync handle)"},
+		{"ptsfixup", "pipeline: ptsfixup present (OBS-compat, no action needed)"},
+	} {
+		if cp.pipeline.As().GetByName(info[0]) != nil {
+			slog.Info(info[1])
+		}
+	}
+}
+
+// HasCompositor reports whether the pipeline template carries a compositor
+// element (layered multi-source operation).
+func (cp *CompositorPipeline) HasCompositor() bool { return cp.compositor != nil }
+
+// HasEncoder reports whether adaptive bitrate is available.
+func (cp *CompositorPipeline) HasEncoder() bool { return cp.vencEl != nil }
+
+// HasTap reports whether the terminal appsink element was found.
+func (cp *CompositorPipeline) HasTap() bool { return cp.tapEl != nil }
+
+// TapElement returns the terminal appsink element (the `appsink` the pipeline
+// ends in) so the run path can attach the puller. Nil if the tap is absent.
+func (cp *CompositorPipeline) TapElement() gst.Element { return cp.tapEl }
+
+// EncoderName returns the discovered encoder element name ("", "venc_bps",
+// or "venc_kbps").
+func (cp *CompositorPipeline) EncoderName() string { return cp.encoderName }
+
+// SetBitrate sets the encoder's bitrate property in the cached units
+// (bps for venc_bps, kbps for venc_kbps — spec §7.4). It is a command, so it
+// is safe to call from the controller goroutine.
+//
+// The write goes through the cgo g_object_setv path
+// (gstutil.SetNumericProperty), which types the GValue after the property's
+// GParamSpec (x264enc's "bitrate" is a guint in kbit/s): the varargs
+// g_object_set used by the Go binding silently drops int GValues in this
+// GStreamer build, so the plain property setter would be a no-op.
+func (cp *CompositorPipeline) SetBitrate(bps int) error {
+	if cp.vencEl == nil {
+		return fmt.Errorf("compositor: no encoder (bitrate change ignored)")
+	}
+	value := int64(bps / cp.bitrateUnits)
+	// The controller re-applies the target every tick; when it has not
+	// changed, skip the command round trip + g_object_setv entirely.
+	if cur := cp.lastBitrate.Load(); cur != 0 && cur == value {
+		return nil
+	}
+	if err := cp.do(func() error {
+		if err := gstutil.SetNumericProperty(cp.vencEl, "bitrate", value); err != nil {
+			return err
+		}
+		slog.Debug("encoder: bitrate set", "bps", bps, "property", value)
+		return nil
+	}); err != nil {
+		return err
+	}
+	cp.lastBitrate.Store(value)
+	return nil
+}
+
+// SetOverlayText updates the `overlay` textoverlay's text property. No-op
+// (with a one-shot warning) if the pipeline has no textoverlay. Unchanged
+// text skips the command round trip.
+func (cp *CompositorPipeline) SetOverlayText(text string) {
+	if cp.overlayEl == nil {
+		return
+	}
+	if last := cp.lastOverlayText.Load(); last != nil && *last == text {
+		return
+	}
+	if cp.do(func() error {
+		cp.overlayEl.SetObjectProperty("text", text)
+		return nil
+	}) != nil {
+		return
+	}
+	stored := text
+	cp.lastOverlayText.Store(&stored)
+}
+
+// Pipeline exposes the typed pipeline handle (read-only intent).
+func (cp *CompositorPipeline) Pipeline() *gstutil.Pipeline { return cp.pipeline }

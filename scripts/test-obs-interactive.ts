@@ -1,0 +1,534 @@
+// test-obs-interactive.ts — same setup as test-obs.sh, but the 'hls' layer
+// is moved by the USER with arrow keys (10 px per keypress) over the app's
+// shared HTTP API (POST /rpc, --api-addr).
+//
+// Usage (OBS SRT Input source must already listen on 127.0.0.1:$PORT):
+//   bun scripts/test-obs-interactive.ts
+//
+// Env overrides (same as test-obs.sh): PORT (7000), BINARY, CONFIG,
+// PIPELINE, SCENE, PAGE_URL.
+//
+// Keys: ← → ↑ ↓ move the hls layer (10 px), r reset to 0,0, q stop the app.
+// Non-TTY stdin: line commands "left" "right" "up" "down" "reset" "quit".
+
+import {
+    existsSync,
+    mkdtempSync,
+    readFileSync,
+    rmSync,
+    writeFileSync,
+} from "node:fs";
+import http from "node:http";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+const PORT = process.env.PORT ?? "7000";
+const BINARY = process.env.BINARY ?? "bin/ctrlirl-coder-linux-amd64";
+const CONFIG = process.env.CONFIG ?? "config.toml";
+
+// Canvas is 1280x720. The hls layer is smaller so it can actually move:
+// geometry validation rejects any rect that would exceed the canvas.
+const CANVAS_W = 1280;
+const CANVAS_H = 720;
+const HLS_W = 1180;
+const HLS_H = 640;
+const PIPELINE = process.env.PIPELINE ?? "pipeline/example-layered.pipeline";
+const SCENE = process.env.SCENE ?? "";
+const PAGE_URL = process.env.PAGE_URL ?? "https://seznam.cz";
+const STEP = 10;
+
+const TMP = mkdtempSync(join(tmpdir(), "test-obs-interactive-"));
+// Shared HTTP API listener (JSON-RPC /rpc + /metrics).
+const API_ADDR = process.env.API_ADDR ?? "127.0.0.1:8899";
+const APP_LOG = join(TMP, "app.log");
+
+function fail(msg: string): never {
+    console.error(`FAIL: ${msg}`);
+    cleanup();
+    process.exit(1);
+}
+
+function cleanup(): void {
+    rmSync(TMP, { recursive: true, force: true });
+}
+
+// --- 0. Scene ----------------------------------------------------------------
+let sceneA: unknown = null;
+let scenePath = SCENE;
+if (!scenePath) {
+    const page = `<!doctype html>
+<style>body{margin:0;width:100vw;height:100vh;box-sizing:border-box;color:#fff;
+display:flex;flex-direction:column;justify-content:space-between;
+background:linear-gradient(160deg,#08243a,#0d4b5c)}
+.c{font-size:72px;font-weight:bold;padding:40px}
+.l{font-size:28px;opacity:.85;padding:0 40px 40px}</style>
+<div class="c" id="c"></div><div class="l">CtrlIRL browser overlay — live page</div>
+<script>const c=document.getElementById('c');
+const t=()=>c.textContent=new Date().toLocaleTimeString();
+t();setInterval(t,250);</script>`;
+    writeFileSync(join(TMP, "browser-page.html"), page);
+    scenePath = join(TMP, "test-scene.json");
+    sceneA = {
+        name: "test-obs-interactive",
+        canvas: { width: 1280, height: 720 },
+        layers: [
+            {
+                id: "main",
+                type: "video",
+                source: "",
+                properties: {
+                    zorder: 1,
+                    xpos: 0,
+                    ypos: 0,
+                    width: 1280,
+                    height: 720,
+                    alpha: 1.0,
+                },
+            },
+            {
+                id: "secondary",
+                type: "video",
+                source: "",
+                properties: {
+                    zorder: 2,
+                    xpos: 0,
+                    ypos: 0,
+                    width: 640,
+                    height: 360,
+                    alpha: 1.0,
+                },
+                filters: [{ kind: "videorotate", params: { angle: -45 } }],
+            },
+            {
+                id: "hls",
+                type: "video",
+                source: "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
+                // Not canvas-sized: the arrow keys move it live, and
+                // a canvas-wide rect can never move (geometry
+                // validation rejects rects exceeding the canvas).
+                properties: {
+                    zorder: 1,
+                    xpos: 0,
+                    ypos: 0,
+                    width: HLS_W,
+                    height: HLS_H,
+                    alpha: 1.0,
+                },
+                filters: [
+                    {
+                        kind: "videocrop",
+                        params: { top: 100, bottom: 100 },
+                    },
+                    {
+                        kind: "videobalance",
+                        params: { brightness: 0.05, saturation: 1.1 },
+                    },
+                    { kind: "videorotate", params: { angle: 45 } },
+                ],
+            },
+
+            {
+                id: "title",
+                type: "text",
+                text: "CTRL IRL",
+                "text-options": {
+                    "font-desc": "Sans Bold 56",
+                    color: "#00E5FF",
+                    "outline-color": "#000000",
+                    "draw-outline": "true",
+                    "draw-shadow": "false",
+                    halignment: "left",
+                    valignment: "top",
+                    xpad: "64",
+                    ypad: "48",
+                },
+                // Sized explicitly: an unsized text layer defaults to the
+                // full canvas, and ypos=20 would push it past the bottom
+                // edge (geometry validation rejects rects over the canvas).
+                properties: {
+                    zorder: 5,
+                    xpos: 0,
+                    ypos: 20,
+                    width: 1280,
+                    height: 700,
+                },
+            },
+            {
+                id: "subtitle",
+                type: "text",
+                text: "second overlay",
+                "text-options": {
+                    "font-desc": "Sans 28",
+                    color: "#FFFFFF",
+                    "shaded-background": "true",
+                    "shading-value": "160",
+                    halignment: "left",
+                    valignment: "top",
+                    xpad: "64",
+                    ypad: "140",
+                    deltax: "4",
+                    "wrap-mode": "word",
+                },
+                properties: { zorder: 6, xpos: 0, ypos: 0 },
+            },
+        ],
+    };
+    writeFileSync(scenePath, JSON.stringify(sceneA, null, 2));
+}
+
+// Second scene: two test videos only — the space key toggles between
+// sceneA (full test scene) and sceneB via RPC scene.switch.
+const sceneB = {
+    name: "test-obs-scene-b",
+    canvas: { width: 1280, height: 720 },
+    layers: [
+        {
+            id: "vid-a",
+            type: "video",
+            source: "",
+            properties: {
+                zorder: 1,
+                xpos: 0,
+                ypos: 0,
+                width: 640,
+                height: 360,
+                alpha: 1.0,
+            },
+        },
+        {
+            id: "vid-b",
+            type: "video",
+            source: "",
+            properties: {
+                zorder: 2,
+                xpos: 640,
+                ypos: 360,
+                width: 640,
+                height: 360,
+                alpha: 1.0,
+            },
+        },
+    ],
+};
+
+// With a user SCENE file, sceneA is that file (register it as-is).
+if (SCENE) sceneA = JSON.parse(readFileSync(scenePath, "utf8"));
+
+const resolveRoot = (p: string) => (p.startsWith("/") ? p : join(root, p));
+for (const p of [CONFIG, PIPELINE, scenePath, BINARY]) {
+    if (!existsSync(resolveRoot(p))) fail(`not found: ${p}`);
+}
+
+// --- 1. Config: point [srt] uri at OBS port ------------------------------------
+const configTmp = join(TMP, "config.toml");
+const cfgSrc = readFileSync(join(root, CONFIG), "utf8");
+const cfgOut = cfgSrc.replace(
+    /(^([ \t]*uri[ \t]*=[ \t]*)"?srt:\/\/[^:]*:)[0-9]+/gm,
+    `$1${PORT}`,
+);
+writeFileSync(configTmp, cfgOut);
+if (!new RegExp(`uri[ \\t]*=[ \\t]*"?srt://[^:]*:${PORT}`).test(cfgOut)) {
+    fail(`config rewrite to port ${PORT} failed`);
+}
+
+// --- 2. Launch the app ---------------------------------------------------------
+console.log(`=== streaming to OBS on 127.0.0.1:${PORT} (binary=${BINARY}) ===`);
+console.log(
+    `    hls layer is at the bottom-left (xpos=0). Arrow keys move it 10 px.`,
+);
+console.log("    r = reset, PgUp/PgDn = rotate 15°, space = switch scene");
+console.log("    (a = full test scene, b = two test videos), q = stop.");
+
+// App logs to a file (asserts read it) and are tailed live to the terminal.
+const logFile = Bun.file(APP_LOG, { write: true, truncate: true });
+const app = Bun.spawn(
+    [
+        join(root, BINARY),
+        "--config",
+        configTmp,
+        "--pipeline",
+        join(root, PIPELINE),
+        "--scene",
+        scenePath,
+        "--api-addr",
+        API_ADDR,
+    ],
+    {
+        cwd: root,
+        stdout: logFile,
+        stderr: logFile,
+    },
+);
+const tail = Bun.spawn(["tail", "-f", APP_LOG], { stderr: "inherit" });
+
+// Forward INT/TERM so Ctrl-C stops the app too.
+let stopping = false;
+const onSig = () => stop();
+process.on("SIGINT", onSig);
+process.on("SIGTERM", onSig);
+
+// --- 3. RPC over the shared HTTP API -----------------------------------------
+// POST /rpc, one JSON-RPC 2.0 object per request. The app starts listening
+// The app starts listening ~1 s after start, so
+// the readiness loop retries system.ping until it answers.
+let rpcOk = false;
+
+// rpcPost sends one request and resolves with the response body ("" on
+// transport failure — fire-and-forget callers ignore it).
+function rpcPost(method: string, params: unknown): Promise<string> {
+    const body = JSON.stringify({
+        jsonrpc: "2.0",
+        id: Date.now(),
+        method,
+        params,
+    });
+    return new Promise((resolve) => {
+        const u = new URL(`http://${API_ADDR}/rpc`);
+        const req = http.request(
+            {
+                hostname: u.hostname,
+                port: u.port,
+                path: u.pathname,
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                timeout: 2000,
+            },
+            (res) => {
+                let data = "";
+                res.setEncoding("utf8");
+                res.on("data", (c) => (data += c));
+                res.on("end", () => resolve(data));
+            },
+        );
+        req.on("error", () => resolve(""));
+        req.on("timeout", () => {
+            req.destroy();
+            resolve("");
+        });
+        req.end(body);
+    });
+}
+
+function rpc(method: string, params: unknown): void {
+    void rpcPost(method, params).then((resp) => {
+        if (resp) {
+            try {
+                const msg = JSON.parse(resp) as { error?: unknown };
+                if (msg.error) console.log(`rpc rejected: ${resp.slice(0, 200)}`);
+            } catch {
+                /* non-JSON response (e.g. 204) — nothing to report */
+            }
+        }
+    });
+}
+
+// Register both scenes once the API answers (register-only, no switch), so
+// the space key can toggle between them with scene.switch.
+let registered = false;
+function registerScenes(): void {
+    if (registered) return;
+    registered = true;
+    rpc("scene.load", { name: "a", json: sceneA, switch: false });
+    rpc("scene.load", { name: "b", json: sceneB, switch: false });
+}
+
+async function pingLoop(): Promise<void> {
+    while (!stopping && !rpcOk) {
+        const resp = await rpcPost("system.ping", {});
+        if (resp.includes("pong")) {
+            rpcOk = true;
+            registerScenes();
+            return;
+        }
+        await new Promise((r) => setTimeout(r, 300));
+    }
+}
+void pingLoop();
+
+function stop(): void {
+    if (stopping) return;
+    stopping = true;
+    try {
+        process.stdin.setRawMode?.(false);
+    } catch {
+        /* non-TTY */
+    }
+    app.kill("SIGINT");
+}
+
+// --- 4. Arrow-key mover ---------------------------------------------------------
+let x = 0;
+let y = 0;
+
+function move(dx: number, dy: number): void {
+    if (dx === 0 && dy === 0) return;
+    // Clamp so the rect always fits the canvas (geometry validation would
+    // reject a rect that exceeds it and drop the layer.set op).
+    x = Math.max(0, Math.min(CANVAS_W - HLS_W, x + dx));
+    y = Math.max(0, Math.min(CANVAS_H - HLS_H, y + dy));
+    rpc("layer.set", {
+        id: "hls",
+        properties: {
+            zorder: 1,
+            xpos: x,
+            ypos: y,
+            width: HLS_W,
+            height: HLS_H,
+            alpha: 1.0,
+        },
+    });
+    process.stderr.write(`\rhls: xpos=${x} ypos=${y}    `);
+}
+
+// Arrow keys arrive as 3-char escape sequences (ESC, "[", letter), often
+// split across data events — accumulate and parse, never per-char switch.
+function resetLayer(): void {
+    x = 0;
+    y = 0;
+    rpc("layer.set", {
+        id: "hls",
+        properties: {
+            zorder: 1,
+            xpos: 0,
+            ypos: 0,
+            width: HLS_W,
+            height: HLS_H,
+            alpha: 1.0,
+        },
+    });
+    process.stderr.write(`\rhls: xpos=${x} ypos=${y}    `);
+}
+
+// hls layer rotation via the videorotate filter (index 2 in the generated
+// scene); PgUp/PgDn step it by 15°. Starts at the scene default 45°.
+let angle = 45;
+function rotateLayer(delta: number): void {
+    angle = (((angle + delta) % 360) + 360) % 360;
+    rpc("filter.set", {
+        id: "hls",
+        index: 2,
+        kind: "videorotate",
+        params: { angle },
+    });
+    process.stderr.write(`\rhls: xpos=${x} ypos=${y} angle=${angle}    `);
+}
+
+// Space toggles between scene a (full test scene) and scene b (two test
+// videos) via RPC scene.switch (both registered at connect time).
+let curScene = "a";
+function switchScene(): void {
+    curScene = curScene === "a" ? "b" : "a";
+    rpc("scene.switch", { name: curScene });
+    const label =
+        curScene === "a" ? "a — full test scene" : "b — two test videos";
+    process.stderr.write(`\rscene: ${label}    `);
+}
+
+const stdin = process.stdin;
+if (stdin.isTTY) {
+    stdin.setRawMode(true);
+    stdin.resume();
+    let kb = "";
+    stdin.on("data", (buf: Buffer) => {
+        kb += buf.toString("latin1");
+        while (kb.length > 0) {
+            if (kb[0] === "\u001b" && kb[1] === "[") {
+                // CSI: final byte is 0x40..0x7e, may arrive in later events
+                // (arrows are 3 chars, PgUp/PgDn "ESC [ 5~" are 4).
+                let end = -1;
+                for (let i = 2; i < kb.length && i < 8; i++) {
+                    const cc = kb.charCodeAt(i);
+                    if (cc >= 0x40 && cc <= 0x7e) {
+                        end = i + 1;
+                        break;
+                    }
+                }
+                if (end < 0) return; // sequence split across events
+                const seq = kb.slice(0, end);
+                kb = kb.slice(end);
+                if (seq === "\u001b[A")
+                    move(0, -STEP); // up
+                else if (seq === "\u001b[B")
+                    move(0, STEP); // down
+                else if (seq === "\u001b[C")
+                    move(STEP, 0); // right
+                else if (seq === "\u001b[D")
+                    move(-STEP, 0); // left
+                else if (seq === "\u001b[5~")
+                    rotateLayer(15); // PgUp
+                else if (seq === "\u001b[6~") rotateLayer(-15); // PgDn
+            } else {
+                const c = kb[0];
+                kb = kb.slice(1);
+                if (c === "r") resetLayer();
+                else if (c === " ")
+                    switchScene(); // space
+                else if (c === "q") {
+                    console.error("\nstopping…");
+                    stop();
+                }
+            }
+        }
+    });
+} else {
+    // Non-TTY: line commands for smoke testing.
+    let buf = "";
+    stdin.resume();
+    stdin.on("data", (chunk: Buffer) => {
+        buf += chunk.toString();
+        let i: number;
+        while ((i = buf.indexOf("\n")) >= 0) {
+            const cmd = buf.slice(0, i).trim().toLowerCase();
+            buf = buf.slice(i + 1);
+            if (cmd === "left") move(-STEP, 0);
+            else if (cmd === "right") move(STEP, 0);
+            else if (cmd === "up") move(0, -STEP);
+            else if (cmd === "down") move(0, STEP);
+            else if (cmd === "reset") resetLayer();
+            else if (cmd === "pageup") rotateLayer(15);
+            else if (cmd === "pagedown") rotateLayer(-15);
+            else if (cmd === "space") switchScene();
+            else if (cmd === "quit") {
+                console.error("\nstopping…");
+                stop();
+            }
+        }
+    });
+}
+
+// --- 5. Wait for the app to exit, then assert -----------------------------------
+// Bun leaves exitCode null when the process died by signal; our graceful
+// SIGINT path exits 0, but a signal death is acceptable too.
+await app.exited;
+const code = app.exitCode ?? null;
+
+stopping = true;
+tail.kill();
+
+const log = existsSync(APP_LOG) ? readFileSync(APP_LOG, "utf8") : "";
+const crit = log
+    .split("\n")
+    .filter((l) => /CRITICAL|ERROR/i.test(l))
+    .filter((l) => !l.includes("gst_mini_object_unref"));
+
+const results: [string, boolean][] = [
+    [
+        code === 0 || code === null,
+        `app exited (code=${code === null ? "signal" : code})`,
+    ],
+    [/pipeline playing/.test(log), "pipeline reached PLAYING"],
+    [/srt: connected/i.test(log), "SRT connected to OBS"],
+    [crit.length === 0, "no CRITICAL/ERROR in app log"],
+];
+let all = true;
+for (const [ok, name] of results) {
+    console.log(`${ok ? "PASS" : "FAIL"}: ${name}`);
+    if (!ok) all = false;
+}
+if (crit.length) console.error(crit.join("\n"));
+
+cleanup();
+process.exit(all ? 0 : 1);

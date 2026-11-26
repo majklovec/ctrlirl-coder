@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  GO_VERSION: "1.26"
+
+jobs:
+  # Pure-Go tier: packages with no cgo in their dependency graph. No GStreamer
+  # and no CERALIVE needed. The full binary (cmd/ctrlirl-coder) is cgo
+  # end-to-end (GStreamer + the CERALIVE SRT fork), so it is NOT built here.
+  pure-go:
+    name: Pure-Go (vet, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      # cgo-free set: balancer, config, controller, metrics, rpc, scene,
+      # server, sinks, sinks/srtla. (compositor/gstutil/gstpull/layer/sinks/srt
+      # pull in GStreamer + the SRT fork and run in the GStreamer tier.)
+      - name: go vet (pure-Go set)
+        run: go vet ./internal/balancer/... ./internal/config ./internal/controller ./internal/metrics ./internal/rpc ./internal/scene ./internal/server ./internal/sinks ./internal/sinks/srtla
+      - name: go test (pure-Go set)
+        run: go test ./internal/balancer/... ./internal/config ./internal/controller ./internal/metrics ./internal/rpc ./internal/scene ./internal/server ./internal/sinks ./internal/sinks/srtla
+
+  # GStreamer tier: build the CERALIVE SRT bundle, build + test the full
+  # binary against it, and run the integration smoke.
+  gstreamer:
+    name: GStreamer tier (CERALIVE build, test, integration)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Install GStreamer dev + plugins + CERALIVE build deps (gnuTLS, cmake, c++)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc g++ cmake pkg-config git \
+            libglib2.0-dev libgnutls28-dev \
+            gstreamer1.0-dev gstreamer1.0-tools gstreamer1.0-tools-good \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad \
+            gstreamer1.0-libav
+      - name: Build CERALIVE SRT bundle (amd64)
+        run: make bundle-amd64
+      - name: Build binary (link CERALIVE, embed identity)
+        run: make dist-amd64
+      - name: Vet + test (full suite against the fork)
+        run: |
+          make vet
+          make test
+      - name: SRT stream test (full pipeline vs local listener)
+        run: bash scripts/test-stream.sh
+      - name: Integration smoke (layered + full pipelines vs local srtsrc)
+        run: bash scripts/integration-smoke.sh
+
+  # arm64 cross-compilation: build the CERALIVE fork for arm64, cross-compile
+  # the cgo binary against it, upload.
+  cross-arm64:
+    name: Cross-compile linux/arm64 (GStreamer + CERALIVE)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Install arm64 cross toolchain + GStreamer + gnuTLS multiarch dev
+        run: |
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            cmake pkg-config git \
+            libglib2.0-dev:arm64 \
+            libgnutls28-dev:arm64 \
+            libgstreamer1.0-dev:arm64
+      - name: Build CERALIVE SRT bundle (arm64 cross)
+        run: bash scripts/build-ceralive-srt.sh --arch arm64 --out .build/ceralive-srt/arm64
+      - name: Cross-compile arm64 binary against the fork
+        run: |
+          BUNDLE=.build/ceralive-srt/arm64
+          sha=$(sed -n 's/.*"lib_sha256": "\([0-9a-f]*\)".*/\1/p' "$BUNDLE/build.json")
+          src=$(sed -n 's/.*"source_sha": "\([0-9a-f]*\)".*/\1/p' "$BUNDLE/build.json")
+          CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
+            PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
+            CGO_CFLAGS="-I$BUNDLE/include" \
+            CGO_LDFLAGS="-L$BUNDLE/lib -lsrt -Wl,-rpath,\$$ORIGIN -Wl,--enable-new-dtags" \
+            go build -ldflags "-X ctrlirl-coder/internal/sinks/srt.ceraliveLibSHA256=$sha -X ctrlirl-coder/internal/sinks/srt.ceraliveSourceSHA=$src" \
+            -o bin/ctrlirl-coder-linux-arm64 ./cmd/ctrlirl-coder
+          libfile=$(sed -n 's/.*"lib_file": "\([^"]*\)".*/\1/p' "$BUNDLE/build.json"); cp "$BUNDLE/$libfile" bin/arm64-libsrt.so.1.5
+          cp "$BUNDLE/build.json" bin/arm64-build.json
+      - name: Upload arm64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctrlirl-coder-linux-arm64
+          path: |
+            bin/ctrlirl-coder-linux-arm64
+            bin/arm64-libsrt.so.1.5
+            bin/arm64-build.json
+
+  # TypeScript bindings tier: unit tests + typecheck. The binary-spawning
+  # integration test is skipped when the Go binary is absent, so no GStreamer
+  # or CERALIVE build is needed here.
+  bindings:
+    name: TS bindings (bun test, typecheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: bun install
+        run: bun install --frozen-lockfile
+        working-directory: bindings
+      - name: bun test
+        run: bun test
+        working-directory: bindings
+      - name: typecheck
+        run: bun run typecheck
+        working-directory: bindings
