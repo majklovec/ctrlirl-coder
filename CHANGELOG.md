@@ -4,6 +4,14 @@
 ### Bug Fixes
 
 * **ci:** release proof = Release job success, not step outputs ([8157bda](https://github.com/majklovec/ctrlirl-coder/commit/8157bda6cb0c69e732f3ba0d7bd28a469a57ea1e))
+* **ci:** sync branch+tags before semantic-release to prevent duplicate version bumps ([a4a529b](https://github.com/majklovec/ctrlirl-coder/commit/a4a529bb0cbd928b9a754b4e6c203ca672701001))
+
+## [1.2.6](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.5...v1.2.6) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** release proof = Release job success, not step outputs ([8157bda](https://github.com/majklovec/ctrlirl-coder/commit/8157bda6cb0c69e732f3ba0d7bd28a469a57ea1e))
 
 ## [1.2.5](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.4...v1.2.5) (2026-11-27)
 
