@@ -875,6 +875,24 @@ Still open:
   release that actually has `.deb` assets (worst case `main` lags one
   release until the next run). A failed fetch warns instead of failing the
   run so one flaky release never holds `main` back.
+- **2026-11-27 (canonical apt layout, `main`-only, scanpkg/redirect bugs):**
+  the apt repo was non-canonical — a per-component `dists/<component>/` each
+  with its own `Release` (`Codename` = `<n>`) — so the consumer line
+  `…/deb/dists main main-ci` parsed as distribution `main` / component
+  `main-ci`, and every `apt-get update` probe 404'd (the i386 probe was a
+  fatal `Err`). Restructured to the canonical layout: one `Codename:
+  ctrlirl`, per-arch `dists/ctrlirl/<component>/binary-<arch>/Packages.gz`,
+  and a single `Release` with `Architectures: amd64 arm64` (no i386). The
+  **`main-ci` component is gone** (user: `main` only) — `main` = release
+  debs. Source line is now
+  `deb [trusted=yes] https://majklovec.github.io/ctrlirl-coder/deb ctrlirl
+  main`. Two latent bugs surfaced building it locally:
+  `dpkg-scanpackages <dir> -` treats the bare `-` as the *override file*
+  (→ "override file - not found", empty Packages) — use `/dev/null`; and
+  after `cd "$COMP"`, redirecting to `> "$d/Packages"` (the pre-cd absolute
+  path) writes nowhere — redirect to `> "$sub/Packages"` (basename, relative
+  to `$COMP`). Verified: `apt-get update` + `apt-cache policy` resolve the
+  package from a `file:` repo of this exact layout.
 - **2026-11-27 (main component: Release-job proof, no step outputs):**
   the latest-release scan read the version job's `Detect release tag`
   step `outputs.new_tag` via the REST API, which returns `outputs: null`

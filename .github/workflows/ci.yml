@@ -249,10 +249,10 @@ jobs:
           done < /tmp/debs.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # The repo artifact carries main-ci (this run's debs, at the root)
-      # and main (latest successful release debs, under repo/) together,
-      # so a single Page deploy always has both components.
-      - name: Upload repo artifact (main-ci + main)
+      # The repo artifact carries the main (release) debs under repo/main
+      # plus this run's CI amd64 deb at the root, so a single Pages deploy
+      # has the main component.
+      - name: Upload repo artifact (main + CI amd64 deb)
         if: steps.skip-check.outputs.do == 'no'
         uses: actions/upload-artifact@v7
         with:
@@ -384,20 +384,17 @@ jobs:
       # per-arch release .debs and uploads the combined repo artifact).
 
   # Deb package repo (GitHub Pages): publish .debs as a static apt-style
-  # repository with two components, always in a single Pages deploy (a
-  # Pages deploy replaces the whole site, so both components must go out
-  # together):
+  # repository with a single component, `main` (release debs), in one
+  # Pages deploy (a Pages deploy replaces the whole site):
   #
   #   main     — release debs (tag versions, e.g. 1.0.3-1), from the
-  #              latest Release run that cut a tag
-  #   main-ci  — per-push CI debs (0.9.<run-number>-1), from the current
-  #              (workflow_run: latest successful) CI push to main
+  #              latest Release that cut a tag
   #
-  #   deb [trusted=yes] https://majklovec.github.io/ctrlirl-coder/deb/dists main main-ci
+  #   deb [trusted=yes] https://majklovec.github.io/ctrlirl-coder/deb ctrlirl main
   #
-  # Unsigned: consumers add the repo with [trusted=yes]. Both components are
-  # monotonic (semver tag / run number), so `apt upgrade` tracks the newest
-  # of each.
+  # Canonical apt layout: dists/ctrlirl/<component>/binary-<arch>/Packages.gz.
+  # Unsigned: consumers add the repo with [trusted=yes]. The main version is
+  # monotonic (semver tag), so `apt upgrade` tracks the newest release.
   #
   # Triggers: every green CI push to main, and every successful Release
   # workflow run. Requires: Settings > Pages > Source = "GitHub Actions".
@@ -429,8 +426,8 @@ jobs:
         with:
           script: |
             if (context.eventName === 'workflow_run') {
-              // Release run: publish its debs under main (and main-ci)
-              // only when it cut a tag.
+              // Release run: publish its debs under main only when it
+              // cut a tag.
               const pick = (r, keys) => {
                 let v = r;
                 for (const k of keys) { if (v && !Array.isArray(v)) v = v[k]; }
@@ -453,9 +450,9 @@ jobs:
               }
               core.setOutput('mode', 'release');
             } else {
-              // CI push: the dist-amd64 job already combined this run's
-              // debs (main-ci) with the latest successful release's debs
-              // (main) in one artifact — no run discovery needed here.
+              // CI push: the dist-amd64 job already bundled the latest
+              // release's debs (main) in one artifact — no run discovery
+              // needed here.
               core.setOutput('mode', 'ci');
             }
             core.setOutput('skip', 'false');
@@ -466,38 +463,22 @@ jobs:
         name: Install dpkg packaging tools
         run: sudo apt-get update && sudo apt-get install -y dpkg-dev
       - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'ci'
-        name: Download repo artifact (main-ci + main)
+        name: Download repo artifact
         uses: actions/download-artifact@v7
         continue-on-error: true
         with:
           name: ctrlirl-coder-repo
           path: repo-src
       - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'ci'
-        name: Download CI arm64 deb
-        uses: actions/download-artifact@v7
-        continue-on-error: true
-        with:
-          name: ctrlirl-coder-ci-arm64
-          path: deb-ci-arm64
-      - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'ci'
-        name: Split repo artifact into components
+        name: Collect main debs (latest release)
         run: |
           set -euo pipefail
-          mkdir -p debs/main-ci debs/main
-          # root files = this run amd64 (main-ci); repo/ = latest release (main)
-          if [ -d repo-src ]; then
-            # the artifact's root is the repo dir (LCA of deb + repo/), so the
-            # CI debs land under repo-src/dist/ — scan all depths except repo/
-            find repo-src -name '*.deb' -not -path 'repo-src/repo/*' -exec cp {} debs/main-ci/ \;
-          fi
-          if [ -d deb-ci-arm64 ]; then cp -n deb-ci-arm64/*.deb debs/main-ci/; fi
+          mkdir -p debs/main
+          # the artifact's root is the repo dir; release debs live under repo/main/
           if [ -d repo-src/repo ]; then
             find repo-src/repo -name '*.deb' -exec cp {} debs/main/ \;
-            find repo-src/repo -name '*.deb' -exec cp -n {} debs/main-ci/ \;
-          else
-            echo "(no earlier release — main mirrors main-ci)"
-            cp -n debs/main-ci/*.deb debs/main/
           fi
+          [ -n "$(ls debs/main/*.deb 2>/dev/null)" ] || echo "(no release debs yet — main empty)"
       - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
         name: Download release debs (amd64)
         uses: actions/download-artifact@v7
@@ -510,12 +491,6 @@ jobs:
         with:
           name: ctrlirl-coder-rel-arm64
           path: debs/main
-      - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
-        name: Copy release debs to main-ci
-        run: |
-          set -euo pipefail
-          mkdir -p debs/main-ci
-          cp debs/main/*.deb debs/main-ci/
       - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
         name: Download release tarballs (binaries)
         uses: actions/download-artifact@v7
@@ -545,38 +520,52 @@ jobs:
           done
           ls -l site/bin
       - if: steps.resolve.outputs.skip == 'false'
-        name: Build apt repo (main + main-ci)
+        name: Build apt repo (main)
         run: |
           set -euo pipefail
+          # Canonical apt layout: a single Codename (ctrlirl) with `main` as the
+          # component. apt resolves dists/ctrlirl/<comp>/binary-<arch>/Packages.gz,
+          # so the per-arch index must live in the arch subdir and Filename: must
+          # be relative to the component.
+          DIST="site/deb/dists/ctrlirl"
+          mkdir -p "$DIST"
+          : > /tmp/comps
           build() {
-            local comp=$1 srcdir=$2 desc=$3
-            local SITE="site/deb/dists/$1"
-            [ -d "$srcdir" ] || { echo "no debs for $1 — skipping component"; return 0; }
-            mkdir -p "$SITE/binary-amd64" "$SITE/binary-arm64"
+            local comp=$1 srcdir=$2
+            local COMP="$DIST/$comp"
+            [ -d "$srcdir" ] || { echo "no debs for $comp — skipping"; return 0; }
             for f in "$srcdir"/*.deb; do
               [ -e "$f" ] || continue
               arch=$(dpkg-deb -f "$f" Architecture)
-              cp "$f" "$SITE/binary-$arch/"
+              mkdir -p "$COMP/binary-$arch"
+              cp "$f" "$COMP/binary-$arch/"
             done
-            (
-              cd "$SITE"
-              dpkg-scanpackages --multiversion . . /dev/null > Packages
-              gzip -9kf Packages
-            )
-            cat > "$SITE/Release" <<RELEASE
+            # Per-arch Packages: scan each arch subdir from the component root
+            # so Filename: is relative to the component (binary-<arch>/<deb>),
+            # which is what apt resolves. /dev/null is the (empty) override
+            # file — a bare "-" is mis-parsed as a path → empty Packages.
+            for d in "$COMP"/binary-*; do
+              [ -e "$d" ] || continue
+              sub=$(basename "$d")
+              # redirect to $sub/Packages (relative to $COMP after the cd), not
+              # $d/Packages (which is only valid from the original CWD).
+              ( cd "$COMP" && dpkg-scanpackages --multiversion "$sub" /dev/null > "$sub/Packages" 2>/dev/null )
+              gzip -9f "$d/Packages"
+            done
+            echo "$comp" >> /tmp/comps
+          }
+          build main debs/main
+          [ -s /tmp/comps ] || { echo "no components to publish"; exit 1; }
+          cat > "$DIST/Release" <<RELEASE
           Origin: CtrlIRL
           Label: ctrlirl-coder
           Suite: stable
-          Codename: $1
+          Codename: ctrlirl
           Architectures: amd64 arm64
-          Components: $1
-          Description: $desc
+          Components: $(tr '\n' ' ' < /tmp/comps)
+          Description: CtrlIRL-Coder live SRT encoder (releases)
           RELEASE
-            echo "Date: $(date -u '+%a, %d %b %Y %H:%M:%S UTC')" >> "$SITE/Release"
-          }
-          build main debs/main "CtrlIRL-Coder live SRT encoder (releases)" || true
-          build main-ci debs/main-ci "CtrlIRL-Coder live SRT encoder (CI builds)" || true
-          [ -d site/deb/dists/main ] || [ -d site/deb/dists/main-ci ]
+          echo "Date: $(date -u '+%a, %d %b %Y %H:%M:%S UTC')" >> "$DIST/Release"
           ls -lR site
       - if: steps.resolve.outputs.skip == 'false'
         name: Write index.html (.deb list)
@@ -598,14 +587,13 @@ jobs:
             echo '<p>Static apt-style repository (unsigned — <code>[trusted=yes]</code>), published by the CI <code>package-repo</code> job.</p>'
             echo '<h2>Package components</h2>'
             echo '<table><tr><th>Component</th><th>Content</th><th>Versioning</th></tr>'
-            echo '<tr><td>main</td><td>release debs</td><td>release tags (e.g. 1.0.3-1)</td></tr>'
-            echo '<tr><td>main-ci</td><td>every green CI build on main</td><td>run number (0.9.N-1)</td></tr></table>'
+            echo '<tr><td>main</td><td>release debs</td><td>release tags (e.g. 1.0.3-1)</td></tr></table>'
             echo '<h2>Add the repository</h2>'
-            echo '<pre>deb [trusted=yes] https://majklovec.github.io/ctrlirl-coder/deb/dists main main-ci</pre>'
+            echo '<pre>deb [trusted=yes] https://majklovec.github.io/ctrlirl-coder/deb ctrlirl main</pre>'
             echo '<h2>Debs</h2>'
             echo '<table><tr><th>Version</th><th>Component</th><th>Architecture</th><th>Size</th><th>File</th></tr>'
-            for comp in main main-ci; do
-              for f in "site/deb/dists/$comp"/binary-*/*.deb; do
+            for comp in main; do
+              for f in "site/deb/dists/ctrlirl/$comp"/binary-*/*.deb; do
                 [ -e "$f" ] || continue
                 arch=$(basename "$(dirname "$f")" | sed 's/^binary-//')
                 ver=$(dpkg-deb -f "$f" Version 2>/dev/null || basename "$f" | sed -E 's/^ctrlirl-coder_(.*)_[a-z0-9]+\.deb$/\1/')
@@ -640,15 +628,14 @@ jobs:
           cat > site/README.md <<'README'
           # CtrlIRL-Coder — deb package repository
 
-          Two components (both unsigned — add with `[trusted=yes]`):
+          Single component (unsigned — add with `[trusted=yes]`):
 
           | Component | Content | Versioning |
           |---|---|---|
           | `main` | release debs | release tags (e.g. 1.0.3-1) |
-          | `main-ci` | every green CI build on main | run number (0.9.N-1) |
 
           ```sh
-          echo "deb [trusted=yes] https://majklovec.github.io/ctrlirl-coder/deb/dists main main-ci"             | sudo tee /etc/apt/sources.list.d/ctrlirl-coder.list
+          echo "deb [trusted=yes] https://majklovec.github.io/ctrlirl-coder/deb ctrlirl main" | sudo tee /etc/apt/sources.list.d/ctrlirl-coder.list
           sudo apt-get update
           sudo apt-get install ctrlirl-coder
           ```
