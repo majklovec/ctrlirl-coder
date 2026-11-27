@@ -259,8 +259,10 @@ jobs:
   # cgo binary against it, smoke it under qemu-user, build the .deb, publish.
   dist-arm64:
     name: Build + test arm64 (cross), publish
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: version
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      (needs.dist-amd64.result == 'success' || needs.dist-amd64.result == 'skipped')
+    needs: [version, dist-amd64]
     runs-on: ubuntu-latest
     env:
       DEB_VERSION: "0.9.${{ github.run_number }}"

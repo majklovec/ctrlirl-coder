@@ -853,6 +853,14 @@ Still open:
   so the smoke step no-ops when qemu is absent. **The Pages repo part of
   this was later removed** ("no need of github pages") — see the entry
   below.
+- **2026-11-27 (CI first-frame flakes: serialize dist jobs + retry
+  filter test):** the `dist-amd64` and `dist-arm64` jobs built GStreamer
+  stacks concurrently on separate 2-vCPU runners while the Release job
+  also ran its full build, and the first-frame tests kept timing out at
+  30 s (`TestRotateTransparentCorners`) even at 30 s. `dist-arm64` now
+  `needs` `dist-amd64` (skips when that one is skipped), so at most two
+  GStreamer-heavy jobs run at once, and the filter test re-arms its
+  finite pipeline for a second 30 s attempt before failing.
 - **2026-11-27 (TestAppsinkPull flake on 2-vCPU runners):** the
   live-paced (`is-live=true` 30×30fps) pull test can yield 0 frames when
   the test process is descheduled while the finite source runs out — the

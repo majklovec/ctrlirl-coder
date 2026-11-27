@@ -100,37 +100,46 @@ func TestRotateTransparentCorners(t *testing.T) {
 
 	// Pull the first frame through the production appsink pull path.
 	puller := gstpull.Attach(sink, 1000)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	firstFrame := make(chan []byte, 1)
-	go puller.Run(ctx, func(b []byte) (int, error) {
-		cp := make([]byte, len(b))
-		copy(cp, b)
-		select {
-		case firstFrame <- cp:
-		default:
-		}
-		return len(b), nil
-	})
 
-	if err := base.SetState(gst.StatePlaying); err != nil {
-		cancel()
-		t.Fatalf("pipeline failed to start: %v", err)
-	}
-
-	// 30 s: a 2 vCPU CI runner under GStreamer load has been observed to
-	// need far longer than the 5 s this once used to allow before the
-	// first frame; locally the frame arrives in well under a second.
+	// A 2 vCPU CI runner under GStreamer load has been observed to stall
+	// first-frame delivery far longer than the sub-second it takes locally,
+	// so each attempt allows 30 s and the (finite, re-armable) pipeline is
+	// retried a second time before failing.
 	var frame []byte
-	select {
-	case frame = <-firstFrame:
-	case <-time.After(30 * time.Second):
-		cancel()
-		base.SetState(gst.StateNull)
-		t.Fatal("timed out waiting for a frame from the appsink")
+	for attempt := 1; attempt <= 2; attempt++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		firstFrame := make(chan []byte, 1)
+		go puller.Run(ctx, func(b []byte) (int, error) {
+			cp := make([]byte, len(b))
+			copy(cp, b)
+			select {
+			case firstFrame <- cp:
+			default:
+			}
+			return len(b), nil
+		})
+		if err := base.SetState(gst.StatePlaying); err != nil {
+			cancel()
+			t.Fatalf("pipeline failed to start: %v", err)
+		}
+		select {
+		case frame = <-firstFrame:
+			cancel()
+			base.SetState(gst.StateNull)
+			if attempt > 1 {
+				t.Logf("first frame arrived on attempt %d", attempt)
+			}
+		case <-time.After(30 * time.Second):
+			cancel()
+			base.SetState(gst.StateNull)
+			if attempt == 2 {
+				t.Fatal("timed out waiting for a frame from the appsink (2 attempts)")
+			}
+			t.Log("first frame stalled on attempt 1; re-arming pipeline")
+			continue
+		}
+		break
 	}
-	cancel()
-	base.SetState(gst.StateNull)
 
 	assertTransparentCorners(t, frame, wantW, wantH)
 }
