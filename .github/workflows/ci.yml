@@ -1,853 +1,693 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+    push:
+        branches: [main]
+    pull_request:
 
 env:
-  GO_VERSION: "1.26"
-
+    GO_VERSION: "1.26"
 
 # One run per commit: a fast-follow push replaces the in-flight run.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+    group: ci-${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
 
 jobs:
-  # Semantic versioning: analyzes conventional commits since the last tag
-  # and, when a bump is warranted, prepends the notes to CHANGELOG.md,
-  # commits it, and publishes the tag + GitHub release draft. Emits new_tag
-  # when the tag lands on HEAD (empty for docs-only commits; semantic-release
-  # exits 1 there, so the detect step records it under always()).
-  version:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    outputs:
-      new_tag: ${{ steps.semver.outputs.new_tag }}
-    permissions:
-      contents: write
-      issues: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
+    # Semantic versioning: analyzes conventional commits since the last tag
+    # and, when a bump is warranted, prepends the notes to CHANGELOG.md,
+    # commits it, and publishes the tag + GitHub release draft. Emits new_tag
+    # when the tag lands on HEAD (empty for docs-only commits; semantic-release
+    # exits 1 there, so the detect step records it under always()).
+    version:
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        runs-on: ubuntu-latest
+        outputs:
+            new_tag: ${{ steps.semver.outputs.new_tag }}
+        permissions:
+            contents: write
+            issues: write
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  fetch-depth: 0
 
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 22
+            - uses: actions/setup-node@v7
+              with:
+                  node-version: 22
 
-      - name: Install semantic-release + plugins
-        run: |
-          npm install --no-save \
-            semantic-release@24 \
-            @semantic-release/changelog \
-            @semantic-release/git \
-            @semantic-release/github
+            - name: Install semantic-release + plugins
+              run: |
+                  npm install --no-save \
+                    semantic-release@24 \
+                    @semantic-release/changelog \
+                    @semantic-release/git \
+                    @semantic-release/github
 
-      # Sync to origin/main before running semrel. The checkout is pinned to
-      # this run's head SHA; if a faster run already cut a tag + chore commit,
-      # the pinned HEAD is behind it and semrel would recompute the same
-      # version and fail to push a tag that already exists. Fast-forwarding
-      # to origin/main (and refreshing tags) makes the analysis current.
-      - name: Sync branch and tags to origin
-        run: |
-          set -euo pipefail
-          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --force --tags origin
-          git fetch origin main
-          # Only fast-forward; never rewrite a non-ff branch.
-          git merge --ff-only origin/main || true
+            # Sync to origin/main before running semrel. The checkout is pinned to
+            # this run's head SHA; if a faster run already cut a tag + chore commit,
+            # the pinned HEAD is behind it and semrel would recompute the same
+            # version and fail to push a tag that already exists. Fast-forwarding
+            # to origin/main (and refreshing tags) makes the analysis current.
+            - name: Sync branch and tags to origin
+              run: |
+                  set -euo pipefail
+                  git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+                  git fetch --force --tags origin
+                  git fetch origin main
+                  # Only fast-forward; never rewrite a non-ff branch.
+                  git merge --ff-only origin/main || true
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Semantic versioning (semantic-release)
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: npx --yes semantic-release@24
+
+            - name: Detect release tag
+              if: always()
+              id: semver
+              run: |
+                  git fetch --force --tags
+                  TAG="$(git describe --tags --abbrev=0 HEAD 2>/dev/null || true)"
+                  if [ -n "$TAG" ] && [ "$(git rev-parse "$TAG^{commit}")" = "$(git rev-parse HEAD)" ]; then
+                    echo "new_tag=${TAG}" >> "$GITHUB_OUTPUT"
+                    echo "Release $TAG cut."
+                  else
+                    echo "new_tag=" >> "$GITHUB_OUTPUT"
+                    echo "No version bump needed for this commit — skipping release."
+                  fi
+
+    # Pure-Go tier: packages with no cgo in their dependency graph. No GStreamer
+    # and no CERALIVE needed.
+    pure-go:
+        name: Test pure-Go (vet, test)
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+            - uses: actions/setup-go@v7
+              with:
+                  go-version: ${{ env.GO_VERSION }}
+                  cache: true
+            # cgo-free set: balancer, config, controller, metrics, rpc, scene,
+            # server, sinks, sinks/srtla. (compositor/gstutil/gstpull/layer/sinks/srt
+            # pull in GStreamer + the SRT fork and run in the dist-amd64 job.)
+            - name: go vet (pure-Go set)
+              run: go vet ./internal/balancer/... ./internal/config ./internal/controller ./internal/metrics ./internal/rpc ./internal/scene ./internal/server ./internal/sinks ./internal/sinks/srtla
+            - name: go test (pure-Go set)
+              run: go test ./internal/balancer/... ./internal/config ./internal/controller ./internal/metrics ./internal/rpc ./internal/scene ./internal/server ./internal/sinks ./internal/sinks/srtla
+
+    # TypeScript bindings tier: unit tests + typecheck. The binary-spawning
+    # integration test skips when the Go binary is absent, so no GStreamer build
+    # is needed here.
+    bindings:
+        name: Test TS bindings (bun test, typecheck)
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+            - uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: latest
+            - name: bun install
+              run: bun install --frozen-lockfile
+              working-directory: bindings
+            - name: bun test
+              run: bun test
+              working-directory: bindings
+            - name: typecheck
+              run: bun run typecheck
+              working-directory: bindings
+
+    # Native amd64: build the CERALIVE SRT bundle + binary, run the full test
+    # suite (go test, SRT stream, integration smoke), build the .deb, publish.
+    # Native amd64: the single canonical native build and full integration test run.
+    # Its artifacts are reused by the Release job and the CI APT repository.
+    dist-amd64:
+        name: Build + test amd64
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        needs: version
+        runs-on: ubuntu-latest
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            DEB_VERSION: ${{ needs.version.outputs.new_tag != '' && needs.version.outputs.new_tag || format('0.9.{0}', github.run_number) }}
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  ref: ${{ needs.version.outputs.new_tag != '' && needs.version.outputs.new_tag || github.sha }}
+            - uses: actions/setup-go@v7
+              with:
+                  go-version: ${{ env.GO_VERSION }}
+                  cache: true
 
-      - name: Semantic versioning (semantic-release)
+            - name: Install GStreamer dev + plugins + CERALIVE build deps
+              run: |
+                  set -euo pipefail
+                  sudo apt-get update
+                  sudo apt-get install -y --no-install-recommends \
+                    gcc g++ cmake pkg-config git dpkg-dev \
+                    libglib2.0-dev libgnutls28-dev \
+                    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+                    gstreamer1.0-tools \
+                    gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+                    gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad \
+                    gstreamer1.0-libav gstreamer1.0-x
+
+            - name: Build amd64 binary (CERALIVE bundle + embedded identity)
+              run: make dist-amd64
+
+            - name: Vet + test (full suite against the fork)
+              run: |
+                  make vet
+                  make test
+
+            - name: SRT stream test
+              run: bash scripts/test-stream.sh
+
+            - name: Integration smoke
+              run: bash scripts/integration-smoke.sh
+
+            - name: Build amd64 .deb
+              run: bash scripts/build-deb.sh --arch amd64 --version "$DEB_VERSION"
+
+            - name: Package amd64 release tarball
+              run: |
+                  set -euo pipefail
+                  mkdir -p dist/pkg-amd64/ctrlirl-coder
+                  cp bin/ctrlirl-coder-linux-amd64 dist/pkg-amd64/ctrlirl-coder/
+                  cp bin/libsrt.so.1.5 dist/pkg-amd64/ctrlirl-coder/libsrt.so.1.5
+                  cp bin/build.json dist/pkg-amd64/ctrlirl-coder/
+                  VERSION="${DEB_VERSION#v}"
+                  tar -C dist/pkg-amd64 -czf "dist/ctrlirl-coder-${VERSION}-linux-amd64.tar.gz" ctrlirl-coder
+
+            - name: Fetch latest published release .debs for APT main
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  set -uo pipefail
+                  mkdir -p repo/main
+                  json="$(curl -sf -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                    "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=10")" \
+                    || { echo "::warning::Could not list releases — main component will be empty."; exit 0; }
+                  echo "$json" | python3 -c 'import sys,json
+                  for r in json.load(sys.stdin):
+                      debs=[a for a in r["assets"] if a["name"].endswith(".deb")]
+                      if debs:
+                          for a in debs:
+                              print(a["name"], a["browser_download_url"])
+                          break' > /tmp/debs.txt
+                  while read -r name url; do
+                    [ -z "${name:-}" ] && continue
+                    curl -sf -L -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                      -o "repo/main/${name}" "$url" \
+                      || echo "::warning::Failed to fetch ${name}; keeping the rest of main."
+                  done < /tmp/debs.txt
+
+            # One combined artifact is consumed by the push-triggered Pages job.
+            - name: Upload CI APT repository payload
+              uses: actions/upload-artifact@v7
+              with:
+                  name: ctrlirl-coder-repo
+                  path: |
+                      dist/ctrlirl-coder_*_amd64.deb
+                      repo/
+
+            # These are the canonical release payloads too: no second compilation.
+            - name: Upload amd64 release deb
+              uses: actions/upload-artifact@v7
+              with:
+                  name: ctrlirl-coder-rel-amd64
+                  path: dist/ctrlirl-coder_*_amd64.deb
+                  if-no-files-found: error
+
+            - name: Upload amd64 release tarball
+              uses: actions/upload-artifact@v7
+              with:
+                  name: ctrlirl-coder-bin-amd64
+                  path: dist/ctrlirl-coder-*-linux-amd64.tar.gz
+                  if-no-files-found: error
+
+    # arm64 cross-build runs in parallel with amd64 and is also reused for release.
+    dist-arm64:
+        name: Build arm64 (cross)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        needs: version
+        runs-on: ubuntu-latest
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx --yes semantic-release@24
+            DEB_VERSION: ${{ needs.version.outputs.new_tag != '' && needs.version.outputs.new_tag || format('0.9.{0}', github.run_number) }}
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  ref: ${{ needs.version.outputs.new_tag != '' && needs.version.outputs.new_tag || github.sha }}
+            - uses: actions/setup-go@v7
+              with:
+                  go-version: ${{ env.GO_VERSION }}
+                  cache: true
 
-      - name: Detect release tag
-        if: always()
-        id: semver
-        run: |
-          git fetch --force --tags
-          TAG="$(git describe --tags --abbrev=0 HEAD 2>/dev/null || true)"
-          if [ -n "$TAG" ] && [ "$(git rev-parse "$TAG^{commit}")" = "$(git rev-parse HEAD)" ]; then
-            echo "new_tag=${TAG}" >> "$GITHUB_OUTPUT"
-            echo "Release $TAG cut."
-          else
-            echo "new_tag=" >> "$GITHUB_OUTPUT"
-            echo "No version bump needed for this commit — skipping release."
-          fi
+            - name: Install arm64 cross toolchain + GStreamer multiarch dev
+              run: |
+                  set -euo pipefail
+                  sudo dpkg --add-architecture arm64
+                  sudo apt-get update
+                  sudo apt-get install -y --no-install-recommends \
+                    gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+                    binutils-aarch64-linux-gnu cmake pkg-config git dpkg-dev \
+                    libglib2.0-dev:arm64 libgnutls28-dev:arm64 \
+                    libgstreamer1.0-dev:arm64 \
+                    libgstreamer-plugins-base1.0-dev:arm64
+                  sudo apt-get install -y --no-install-recommends qemu-user-static \
+                    || echo "::warning::qemu-user-static unavailable; arm64 smoke will be skipped"
 
-  # Pure-Go tier: packages with no cgo in their dependency graph. No GStreamer
-  # and no CERALIVE needed.
-  pure-go:
-    name: Test pure-Go (vet, test)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: false
-      # cgo-free set: balancer, config, controller, metrics, rpc, scene,
-      # server, sinks, sinks/srtla. (compositor/gstutil/gstpull/layer/sinks/srt
-      # pull in GStreamer + the SRT fork and run in the dist-amd64 job.)
-      - name: go vet (pure-Go set)
-        run: go vet ./internal/balancer/... ./internal/config ./internal/controller ./internal/metrics ./internal/rpc ./internal/scene ./internal/server ./internal/sinks ./internal/sinks/srtla
-      - name: go test (pure-Go set)
-        run: go test ./internal/balancer/... ./internal/config ./internal/controller ./internal/metrics ./internal/rpc ./internal/scene ./internal/server ./internal/sinks ./internal/sinks/srtla
+            - name: Build CERALIVE SRT bundle (arm64 cross)
+              run: bash scripts/build-ceralive-srt.sh --arch arm64 --out "$PWD/.build/ceralive-srt/arm64"
 
-  # TypeScript bindings tier: unit tests + typecheck. The binary-spawning
-  # integration test skips when the Go binary is absent, so no GStreamer build
-  # is needed here.
-  bindings:
-    name: Test TS bindings (bun test, typecheck)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - name: bun install
-        run: bun install --frozen-lockfile
-        working-directory: bindings
-      - name: bun test
-        run: bun test
-        working-directory: bindings
-      - name: typecheck
-        run: bun run typecheck
-        working-directory: bindings
+            - name: Cross-compile arm64 binary against the fork
+              run: |
+                  set -euo pipefail
+                  BUNDLE="$PWD/.build/ceralive-srt/arm64"
+                  sha=$(sed -n 's/.*"lib_sha256": "\([0-9a-f]*\)".*/\1/p' "$BUNDLE/build.json")
+                  src=$(sed -n 's/.*"source_sha": "\([0-9a-f]*\)".*/\1/p' "$BUNDLE/build.json")
+                  CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
+                    PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
+                    CGO_CFLAGS="-I$BUNDLE/include" \
+                    RPATH='$ORIGIN' \
+                    CGO_LDFLAGS="-L$BUNDLE/lib -lsrt -Wl,-rpath,$RPATH -Wl,--enable-new-dtags" \
+                    go build -ldflags "-X ctrlirl-coder/internal/sinks/srt.ceraliveLibSHA256=$sha -X ctrlirl-coder/internal/sinks/srt.ceraliveSourceSHA=$src" \
+                    -o bin/ctrlirl-coder-linux-arm64 ./cmd/ctrlirl-coder
+                  libfile=$(sed -n 's/.*"lib_file": "\([^"]*\)".*/\1/p' "$BUNDLE/build.json")
+                  cp "$BUNDLE/$libfile" bin/arm64-libsrt.so.1.5
+                  cp "$BUNDLE/build.json" bin/arm64-build.json
 
-  # Native amd64: build the CERALIVE SRT bundle + binary, run the full test
-  # suite (go test, SRT stream, integration smoke), build the .deb, publish.
-  dist-amd64:
-    name: Build + test amd64, publish
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: version
-    runs-on: ubuntu-latest
-    env:
-      DEB_VERSION: "0.9.${{ github.run_number }}"
-    steps:
-      - uses: actions/checkout@v7
-      - name: Check release result (skip when the release already built+tested)
-        id: skip-check
-        if: always()
-        uses: actions/github-script@v9
-        with:
-          script: |
-            // The Release job (this run) owns builds for tagged commits.
-            // If it already finished successfully, the full GStreamer test
-            // suite ran there — skip the duplicate CI build. Otherwise
-            // (no bump, release in flight, or release failed) build here.
-            const pick = (r, keys) => {
-              let v = r;
-              for (const k of keys) { if (v && !Array.isArray(v)) v = v[k]; }
-              return Array.isArray(v) ? v : [];
-            };
-            const resp = await github.rest.actions.listWorkflowRuns({
-              owner: context.repo.owner, repo: context.repo.repo,
-              workflow_id: 'ci.yml', event: 'push', branch: 'main',
-              status: 'completed', per_page: 100,
-            });
-            const runs = pick(resp, ['data', 'workflow_runs']);
-            for (const run of runs) {
-              if (run.head_sha !== context.payload.sha) continue;
-              const jobResp = await github.rest.actions.listJobsForWorkflowRun({
-                owner: context.repo.owner, repo: context.repo.repo,
-                run_id: run.id, per_page: 100,
-              });
-              const jobs = pick(jobResp, ['data', 'jobs']);
-              const rel = jobs.find(j => j.name === 'Release');
-              if (rel && rel.conclusion === 'success') {
-                core.info('Release succeeded for this commit — skipping the CI dist build.');
-                core.setOutput('do', 'yes');
-                return;
-              }
-              break;
-            }
-            core.setOutput('do', 'no');
-            core.info('Building in CI (no successful release for this commit).');
-      - uses: actions/setup-go@v7
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: false
-      - name: Install GStreamer dev + plugins + CERALIVE build deps
-        if: steps.skip-check.outputs.do == 'no'
-        run: |
-          for i in 1 2 3; do
-            sudo apt-get update && break
-            sleep 30
-          done || { echo "apt-get update failed after 3 attempts"; exit 1; }
-          for i in 1 2 3; do
-            sudo apt-get install -y --no-install-recommends \
-            gcc g++ cmake pkg-config git dpkg-dev \
-            libglib2.0-dev libgnutls28-dev \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-            gstreamer1.0-tools \
-            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-            gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad \
-            gstreamer1.0-libav gstreamer1.0-x && break
-            sleep 30
-          done || { echo "apt-get install failed after 3 attempts"; exit 1; }
+            - name: Smoke test under qemu-user
+              run: |
+                  set -euo pipefail
+                  if ! command -v qemu-aarch64-static >/dev/null 2>&1; then
+                    echo "qemu-user-static unavailable; skipping dry-run smoke"
+                    exit 0
+                  fi
+                  cp bin/arm64-libsrt.so.1.5 bin/libsrt.so.1.5
+                  qemu-aarch64-static -L /usr/aarch64-linux-gnu \
+                    ./bin/ctrlirl-coder-linux-arm64 \
+                    --config config.toml \
+                    --pipeline pipeline/example-full.pipeline \
+                    --scene scene.example.json \
+                    --dry-run
 
-      - name: Build binary (CERALIVE bundle + embedded identity)
-        if: steps.skip-check.outputs.do == 'no'
-        run: make dist-amd64
-      - name: Vet + test (full suite against the fork)
-        if: steps.skip-check.outputs.do == 'no'
-        run: |
-          make vet
-          make test
-      - name: SRT stream test (full pipeline vs local listener)
-        if: steps.skip-check.outputs.do == 'no'
-        run: bash scripts/test-stream.sh
-      - name: Integration smoke (layered + full pipelines vs local srtsrc)
-        if: steps.skip-check.outputs.do == 'no'
-        run: bash scripts/integration-smoke.sh
-      - name: Build amd64 .deb
-        if: steps.skip-check.outputs.do == 'no'
-        run: bash scripts/build-deb.sh --arch amd64 --version "$DEB_VERSION"
-      - name: Fetch latest release .debs (main component)
-        if: steps.skip-check.outputs.do == 'no'
-        run: |
-          set -uo pipefail
-          mkdir -p repo/main
-          # The `main` component carries the latest *published* GitHub
-          # Release's debs. They live on the release (permanent), not in a
-          # predecessor run's artifacts (which can 404 across runs).
-          #
-          # Walk the release list for the first release that actually has
-          # `.deb` assets. This run's tag may already exist (semantic-release
-          # cuts it before the Release job attaches assets) — fetching
-          # `/releases/latest` mid-run would then grab a tag with zero
-          # assets and empty `main`. Picking the latest release that has
-          # debs makes the race benign: at worst `main` lags one release
-          # until the next run. A failing fetch warns, it does not fail the
-          # run, so one flaky release never holds `main` back.
-          token="${GITHUB_TOKEN}"
-          json="$(curl -sf -H "Authorization: Bearer ${token}" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=10")" \
-            || { echo "::warning::Could not list releases — main component will be empty."; exit 0; }
-          echo "$json" | python3 -c 'import sys,json
-          for r in json.load(sys.stdin):
-              debs=[a for a in r["assets"] if a["name"].endswith(".deb")]
-              if debs:
-                  for a in debs:
-                      print(a["name"], a["browser_download_url"])
-                  break' > /tmp/debs.txt
-          if [ ! -s /tmp/debs.txt ]; then
-            echo "::warning::No release with .deb assets found — main component will be empty."
-            exit 0
-          fi
-          while read -r name url; do
-            [ -z "${name:-}" ] && continue
-            echo "Fetching ${name} -> repo/main/"
-            curl -sf -L -H "Authorization: Bearer ${token}" -o "repo/main/${name}" "$url" \
-              || echo "::warning::Failed to fetch ${name}; leaving main at prior state."
-          done < /tmp/debs.txt
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # The repo artifact carries the main (release) debs under repo/main
-      # plus this run's CI amd64 deb at the root, so a single Pages deploy
-      # has the main component.
-      - name: Upload repo artifact (main + CI amd64 deb)
-        if: steps.skip-check.outputs.do == 'no'
-        uses: actions/upload-artifact@v7
-        with:
-          name: ctrlirl-coder-repo
-          path: |
-            dist/ctrlirl-coder_*_amd64.deb
-            repo/
-  # arm64 cross-compile: build the CERALIVE fork for arm64, cross-compile the
-  # cgo binary against it, smoke it under qemu-user, build the .deb, publish.
-  dist-arm64:
-    name: Build + test arm64 (cross), publish
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: version
-    runs-on: ubuntu-latest
-    env:
-      DEB_VERSION: "0.9.${{ github.run_number }}"
-    steps:
-      - uses: actions/checkout@v7
-      - name: Check release result (skip when the release already built+tested)
-        id: skip-check
-        if: always()
-        uses: actions/github-script@v9
-        with:
-          script: |
-            // The Release job (this run) owns builds for tagged commits.
-            // If it already finished successfully, the full GStreamer test
-            // suite ran there — skip the duplicate CI build. Otherwise
-            // (no bump, release in flight, or release failed) build here.
-            const pick = (r, keys) => {
-              let v = r;
-              for (const k of keys) { if (v && !Array.isArray(v)) v = v[k]; }
-              return Array.isArray(v) ? v : [];
-            };
-            const resp = await github.rest.actions.listWorkflowRuns({
-              owner: context.repo.owner, repo: context.repo.repo,
-              workflow_id: 'ci.yml', event: 'push', branch: 'main',
-              status: 'completed', per_page: 100,
-            });
-            const runs = pick(resp, ['data', 'workflow_runs']);
-            for (const run of runs) {
-              if (run.head_sha !== context.payload.sha) continue;
-              const jobResp = await github.rest.actions.listJobsForWorkflowRun({
-                owner: context.repo.owner, repo: context.repo.repo,
-                run_id: run.id, per_page: 100,
-              });
-              const jobs = pick(jobResp, ['data', 'jobs']);
-              const rel = jobs.find(j => j.name === 'Release');
-              if (rel && rel.conclusion === 'success') {
-                core.info('Release succeeded for this commit — skipping the CI dist build.');
-                core.setOutput('do', 'yes');
-                return;
-              }
-              break;
-            }
-            core.setOutput('do', 'no');
-            core.info('Building in CI (no successful release for this commit).');
-      - uses: actions/setup-go@v7
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: false
-      - name: Install arm64 cross toolchain + GStreamer + gnuTLS multiarch dev
-        if: steps.skip-check.outputs.do == 'no'
-        run: |
-          sudo dpkg --add-architecture arm64
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            binutils-aarch64-linux-gnu \
-            cmake pkg-config git dpkg-dev \
-            libglib2.0-dev:arm64 \
-            libgnutls28-dev:arm64 \
-            libgstreamer1.0-dev:arm64 \
-            libgstreamer-plugins-base1.0-dev:arm64
-          # qemu is optional: only the dry-run smoke needs it (universe
-          # availability varies across runner images).
-          sudo apt-get install -y --no-install-recommends qemu-user-static \
-            || echo "warn: qemu-user-static unavailable; smoke will be skipped"
-      - name: Build CERALIVE SRT bundle (arm64 cross)
-        if: steps.skip-check.outputs.do == 'no'
-        run: bash scripts/build-ceralive-srt.sh --arch arm64 --out "$PWD/.build/ceralive-srt/arm64"
-      - name: Cross-compile arm64 binary against the fork
-        if: steps.skip-check.outputs.do == 'no'
-        run: |
-          # Absolute paths: cgo compiles in a temp dir, so relative -I/-L
-          # would resolve nowhere (srt/srt.h: No such file or directory).
-          BUNDLE="$PWD/.build/ceralive-srt/arm64"
-          sha=$(sed -n 's/.*"lib_sha256": "\([0-9a-f]*\)".*/\1/p' "$BUNDLE/build.json")
-          src=$(sed -n 's/.*"source_sha": "\([0-9a-f]*\)".*/\1/p' "$BUNDLE/build.json")
-          CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
-            PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
-            CGO_CFLAGS="-I$BUNDLE/include" \
-            RPATH='$ORIGIN' \
-            CGO_LDFLAGS="-L$BUNDLE/lib -lsrt -Wl,-rpath,$RPATH -Wl,--enable-new-dtags" \
-            go build -ldflags "-X ctrlirl-coder/internal/sinks/srt.ceraliveLibSHA256=$sha -X ctrlirl-coder/internal/sinks/srt.ceraliveSourceSHA=$src" \
-            -o bin/ctrlirl-coder-linux-arm64 ./cmd/ctrlirl-coder
-          libfile=$(sed -n 's/.*"lib_file": "\([^"]*\)".*/\1/p' "$BUNDLE/build.json"); cp "$BUNDLE/$libfile" bin/arm64-libsrt.so.1.5
-          cp "$BUNDLE/build.json" bin/arm64-build.json
-      - name: Smoke test under qemu-user (boot, CERALIVE guard, contract)
-        if: steps.skip-check.outputs.do == 'no'
-        run: |
-          if ! command -v qemu-aarch64-static >/dev/null 2>&1; then
-            echo "qemu-user-static not available; skipping dry-run smoke"
-            exit 0
-          fi
-          # The binary loads the bundled libsrt via $ORIGIN — lib must sit
-          # next to the binary. Full-pipeline runs are too slow under
-          # qemu-user emulation; --dry-run validates start, SRT backend
-          # SHA guard, config/scene/pipeline contract.
-          cp bin/arm64-libsrt.so.1.5 bin/libsrt.so.1.5
-          qemu-aarch64-static -L /usr/aarch64-linux-gnu \
-            ./bin/ctrlirl-coder-linux-arm64 \
-            --config config.toml \
-            --pipeline pipeline/example-full.pipeline \
-            --scene scene.example.json \
-            --dry-run
-      - name: Build arm64 .deb
-        if: steps.skip-check.outputs.do == 'no'
-        run: bash scripts/build-deb.sh --arch arm64 --version "$DEB_VERSION"
-      - if: steps.skip-check.outputs.do == 'no'
-        name: Upload CI arm64 deb
-        uses: actions/upload-artifact@v7
-        with:
-          name: ctrlirl-coder-ci-arm64
-          path: dist/ctrlirl-coder_*_arm64.deb
-          if-no-files-found: error
-      # The main component is refreshed by the amd64 job (it downloads both
-      # per-arch release .debs and uploads the combined repo artifact).
+            - name: Build arm64 .deb
+              run: bash scripts/build-deb.sh --arch arm64 --version "$DEB_VERSION"
 
-  # Deb package repo (GitHub Pages): publish .debs as a static apt-style
-  # repository with a single component, `main` (release debs), in one
-  # Pages deploy (a Pages deploy replaces the whole site):
-  #
-  #   main     — release debs (tag versions, e.g. 1.0.3-1), from the
-  #              latest Release that cut a tag
-  #
-  # Consumers sign-authenticate via the shipped public key:
-  #   curl -fsSL https://majklovec.github.io/ctrlirl-coder/deb/ctrlirl.asc -o /etc/apt/keyrings/ctrlirl.asc
-  #   deb [signed-by=/etc/apt/keyrings/ctrlirl.asc] https://majklovec.github.io/ctrlirl-coder/deb ctrlirl main
-  #
-  # Canonical apt layout: dists/ctrlirl/<component>/binary-<arch>/Packages.gz.
-  # GPG-signed: consumers add the repo with [signed-by=] the shipped
-  # ctrlirl.asc. The main version is monotonic (semver tag), so
-  # `apt upgrade` tracks the newest release.
-  #
-  # Triggers: every green CI push to main, and every successful Release
-  # workflow run. Requires: Settings > Pages > Source = "GitHub Actions".
-  package-repo:
-    name: Publish deb package repo to Pages
-    if: |
-      (github.event_name == 'workflow_run' &&
-       github.event.workflow == 'ci.yml' &&
-       github.event.workflow_run.conclusion == 'success') ||
-      (github.event_name == 'push' &&
-       github.ref == 'refs/heads/main' &&
-       needs.pure-go.result == 'success' &&
-       needs.bindings.result == 'success' &&
-       (needs.dist-amd64.result == 'success' || needs.dist-amd64.result == 'skipped') &&
-       (needs.dist-arm64.result == 'success' || needs.dist-arm64.result == 'skipped'))
-    needs: [pure-go, bindings, dist-amd64, dist-arm64]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Resolve debs to publish
-        id: resolve
-        uses: actions/github-script@v9
-        with:
-          script: |
-            if (context.eventName === 'workflow_run') {
-              // Release run: publish its debs under main only when it
-              // cut a tag.
-              const pick = (r, keys) => {
-                let v = r;
-                for (const k of keys) { if (v && !Array.isArray(v)) v = v[k]; }
-                return Array.isArray(v) ? v : [];
-              };
-              const jobs = pick(await github.rest.actions.listJobsForWorkflowRun({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                run_id: context.payload.workflow_run.id,
-                per_page: 100,
-              }), ['data', 'jobs']);
-              const versionJob = jobs.find(j => j.name === 'version');
-              const newTag = versionJob?.steps
-                .find(s => s.name === 'Detect release tag' && s.conclusion === 'success')
-                ?.outputs?.new_tag;
-              if (!newTag) {
-                core.info('Release run cut no tag — skipping the Pages repo.');
-                core.setOutput('skip', 'true');
-                return;
-              }
-              core.setOutput('mode', 'release');
-            } else {
-              // CI push: the dist-amd64 job already bundled the latest
-              // release's debs (main) in one artifact — no run discovery
-              // needed here.
-              core.setOutput('mode', 'ci');
-            }
-            core.setOutput('skip', 'false');
-      - if: steps.resolve.outputs.skip == 'true'
-        name: Skip
-        run: echo "Nothing to publish."
-      - if: steps.resolve.outputs.skip == 'false'
-        name: Install apt packaging tools
-        run: sudo apt-get update && sudo apt-get install -y dpkg-dev gnupg
-      # Import the release GPG key (armored private key) into the runner's
-      # default keyring; later steps on the same runner reuse it. The signed
-      # Release (InRelease + Release.gpg) is produced in the Build step. The
-      # public key is written to site/deb/ctrlirl.asc so it ships in the
-      # Pages deploy and consumers can [signed-by=] it.
-      - if: steps.resolve.outputs.skip == 'false'
-        name: Import GPG release key
-        env:
-          CTRLIRL_GPG_KEY: ${{ secrets.CTRLIRL_GPG_KEY }}
-        run: |
-          set -euo pipefail
-          [ -n "${CTRLIRL_GPG_KEY:-}" ] || {
-            echo "secrets.CTRLIRL_GPG_KEY is not set — cannot sign the apt Release.";
-            echo "Add the release key (armored private key) as a repo secret."; exit 1;
-          }
-          printf '%s' "$CTRLIRL_GPG_KEY" > /tmp/ctrlirl-key.asc
-          gpg --batch --import /tmp/ctrlirl-key.asc
-          gpg --batch --list-secret-keys
-      - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'ci'
-        name: Download repo artifact
-        uses: actions/download-artifact@v7
-        continue-on-error: true
-        with:
-          name: ctrlirl-coder-repo
-          path: repo-src
-      - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'ci'
-        name: Collect main debs (latest release)
-        run: |
-          set -euo pipefail
-          mkdir -p debs/main
-          # the artifact's root is the repo dir; release debs live under repo/main/
-          if [ -d repo-src/repo ]; then
-            find repo-src/repo -name '*.deb' -exec cp {} debs/main/ \;
-          fi
-          [ -n "$(ls debs/main/*.deb 2>/dev/null)" ] || echo "(no release debs yet — main empty)"
-      - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
-        name: Download release debs (amd64)
-        uses: actions/download-artifact@v7
-        with:
-          name: ctrlirl-coder-rel-amd64
-          path: debs/main
-      - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
-        name: Download release debs (arm64)
-        uses: actions/download-artifact@v7
-        with:
-          name: ctrlirl-coder-rel-arm64
-          path: debs/main
-      - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
-        name: Download release tarballs (binaries)
-        uses: actions/download-artifact@v7
-        with:
-          name: ctrlirl-coder-bin-amd64
-          path: pkgs-amd64
-      - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
-        name: Download release tarballs (arm64)
-        uses: actions/download-artifact@v7
-        with:
-          name: ctrlirl-coder-bin-arm64
-          path: pkgs-arm64
-      - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
-        name: Extract release binaries to /bin
-        run: |
-          set -euo pipefail
-          mkdir -p site/bin
-          for arch in amd64 arm64; do
-            tgz=$(ls "pkgs-$arch"/*-linux-$arch.tar.gz 2>/dev/null | head -1)
-            [ -n "$tgz" ] || { echo "no $arch tarball — skipping"; continue; }
-            tar -xzf "$tgz" -C /tmp
-            ver=$(basename "$tgz" | sed -E "s/ctrlirl-coder-([^-]+)-linux-.*\.tar\.gz/\1/")
-            cp /tmp/ctrlirl-coder/ctrlirl-coder-linux-$arch "site/bin/ctrlirl-coder-$ver-linux-$arch"
-            cp /tmp/ctrlirl-coder/libsrt.so.1.5 "site/bin/libsrt-$ver.so.1.5"
-            cp /tmp/ctrlirl-coder/build.json "site/bin/build-$ver.json"
-            rm -rf /tmp/ctrlirl-coder
-          done
-          ls -l site/bin
-      - if: steps.resolve.outputs.skip == 'false'
-        name: Build apt repo (main)
-        run: |
-          set -euo pipefail
-          # Canonical apt layout: a single Codename (ctrlirl) with `main` as the
-          # component. apt resolves dists/ctrlirl/<comp>/binary-<arch>/Packages.gz
-          # (index under the arch subdir) and joins the Packages Filename: field
-          # to the REPOSITORY ROOT — so Filename: must be root-relative:
-          # dists/ctrlirl/<comp>/binary-<arch>/<deb>.
-          SITE="site/deb"
-          DIST="$SITE/dists/ctrlirl"
-          mkdir -p "$DIST"
-          # Ship the public key so consumers can [signed-by=] it.
-          gpg --batch --yes --armor --export release@ctrlirl.local > "$SITE/ctrlirl.asc"
-          : > /tmp/comps
-          build() {
-            local comp=$1 srcdir=$2
-            local COMP="$DIST/$comp"
-            [ -d "$srcdir" ] || { echo "no debs for $comp — skipping"; return 0; }
-            for f in "$srcdir"/*.deb; do
-              [ -e "$f" ] || continue
-              arch=$(dpkg-deb -f "$f" Architecture)
-              mkdir -p "$COMP/binary-$arch"
-              cp "$f" "$COMP/binary-$arch/"
-            done
-            # Per-arch Packages: scan each arch subdir from the REPOSITORY ROOT
-            # so Filename: is root-relative (dists/…/binary-<arch>/<deb>), which
-            # is what apt joins to the repo root. Scanning from the component
-            # root instead yields a component-relative Filename: → apt 404s on
-            # the deb. /dev/null is the (empty) override file — a bare "-" is
-            # mis-parsed as a path → empty Packages.
-            for d in "$COMP"/binary-*; do
-              [ -e "$d" ] || continue
-              rel=${d#"$SITE"/}
-              # redirect to $rel/Packages (relative to $SITE after the cd), not
-              # $d/Packages (only valid from the original CWD).
-              ( cd "$SITE" && dpkg-scanpackages --multiversion "$rel" /dev/null > "$rel/Packages" 2>/dev/null )
-              gzip -9f "$d/Packages"
-            done
-            echo "$comp" >> /tmp/comps
-          }
-          build main debs/main
-          [ -s /tmp/comps ] || { echo "no components to publish"; exit 1; }
-          # Signed Release: apt-ftparchive emits the canonical metadata + full
-          # hash table, then we clear-sign (InRelease) and detached-sign
-          # (Release.gpg) with the release key. Signing is REQUIRED here — an
-          # UNAUTHENTICATED Release carrying a hash table makes apt 3.x
-          # (Ubuntu 26.04 / Pop!_OS) SILENTLY skip the Packages index fetch
-          # (no candidate). A signed Release is authenticated, so the hash
-          # table is expected + verified and the index fetches normally.
-          # Verified end-to-end in a file: repo on apt 3.2.1: signed Release
-          # -> no "No Hash entry" / "Could not determine Signed-By" warnings,
-          # index fetched, apt-get install succeeds.
-          # Public key ships at site/deb/ctrlirl.asc; consumers use that file
-          # in their source line ([signed-by=/etc/apt/…/ctrlirl.asc]).
-          cat > /tmp/apt-release.conf <<CONF
-          APT::FTPArchive::Release::Origin "CtrlIRL";
-          APT::FTPArchive::Release::Label "ctrlirl-coder";
-          APT::FTPArchive::Release::Suite "stable";
-          APT::FTPArchive::Release::Codename "ctrlirl";
-          APT::FTPArchive::Release::Description "CtrlIRL-Coder live SRT encoder (releases)";
-          CONF
-          apt-ftparchive -c /tmp/apt-release.conf release "$DIST" > "$DIST/Release"
-          gpg --batch --yes --pinentry-mode loopback --passphrase '' \
-            --clearsign --output "$DIST/InRelease" "$DIST/Release"
-          gpg --batch --yes --pinentry-mode loopback --passphrase '' \
-            --detach-sign --output "$DIST/Release.gpg" "$DIST/Release"
-          ls -lR site
-      - if: steps.resolve.outputs.skip == 'false'
-        name: Write index.html (.deb list)
-        run: |
-          set -euo pipefail
-          {
-            echo '<!DOCTYPE html>'
-            echo '<html lang="en"><head><meta charset="utf-8">'
-            echo '<title>CtrlIRL-Coder — deb packages</title>'
-            echo '<style>'
-            echo 'body{font-family:system-ui,sans-serif;margin:2rem;max-width:64rem}'
-            echo 'table{border-collapse:collapse;width:100%}'
-            echo 'th,td{border:1px solid #ccc;padding:.4rem .7rem;text-align:left}'
-            echo 'th{background:#f2f2f2}'
-            echo 'pre{background:#f6f6f6;padding:.8rem;overflow-x:auto}'
-            echo 'a{color:#0366d6}'
-            echo '</style></head><body>'
-            echo '<h1>CtrlIRL-Coder — deb packages</h1>'
-            echo '<p>Static apt-style repository, GPG-signed — key at <a href="/deb/ctrlirl.asc">/deb/ctrlirl.asc</a>. Published by the CI <code>package-repo</code> job.</p>'
-            echo '<h2>Package components</h2>'
-            echo '<table><tr><th>Component</th><th>Content</th><th>Versioning</th></tr>'
-            echo '<tr><td>main</td><td>release debs</td><td>release tags (e.g. 1.0.3-1)</td></tr></table>'
-            echo '<h2>Add the repository</h2>'
-            echo '<pre>sudo mkdir -p /etc/apt/keyrings
-            curl -fsSL https://majklovec.github.io/ctrlirl-coder/deb/ctrlirl.asc -o /etc/apt/keyrings/ctrlirl.asc
-            echo "deb [signed-by=/etc/apt/keyrings/ctrlirl.asc] https://majklovec.github.io/ctrlirl-coder/deb ctrlirl main" | sudo tee /etc/apt/sources.list.d/ctrlirl-coder.list
-            sudo apt-get update
-            sudo apt-get install ctrlirl-coder</pre>'
-            echo '<h2>Debs</h2>'
-            echo '<table><tr><th>Version</th><th>Component</th><th>Architecture</th><th>Size</th><th>File</th></tr>'
-            for comp in main; do
-              for f in "site/deb/dists/ctrlirl/$comp"/binary-*/*.deb; do
-                [ -e "$f" ] || continue
-                arch=$(basename "$(dirname "$f")" | sed 's/^binary-//')
-                ver=$(dpkg-deb -f "$f" Version 2>/dev/null || basename "$f" | sed -E 's/^ctrlirl-coder_(.*)_[a-z0-9]+\.deb$/\1/')
-                size=$(( $(stat -c %s "$f") / 1024 ))
-                rel=${f#site/}
-                echo "<tr><td>$ver</td><td>$comp</td><td>$arch</td><td>${size} KiB</td><td><a href=\"$rel\">$rel</a></td></tr>"
-              done
-            done
-            echo '</table>'
-            echo '<h2>Release binaries (latest)</h2>'
-            echo '<p>Each binary needs <code>libsrt-&lt;ver&gt;.so.1.5</code> next to it (CERALIVE SRT fork, identity in <code>build-&lt;ver&gt;.json</code>).</p>'
-            echo '<table><tr><th>Version</th><th>Architecture</th><th>Size</th><th>File</th></tr>'
-            for f in site/bin/ctrlirl-coder-*; do
-              [ -e "$f" ] || continue
-              base=$(basename "$f")
-              # only release-named binaries (ctrlirl-coder-<ver>-linux-<arch>)
-              if ! [[ $base =~ ^ctrlirl-coder-([^-]+)-linux-([a-z0-9]+)$ ]]; then
-                continue
-              fi
-              ver=${BASH_REMATCH[1]}
-              arch=${BASH_REMATCH[2]}
-              size=$(( $(stat -c %s "$f") / 1024 ))
-              echo "<tr><td>$ver</td><td>$arch</td><td>${size} KiB</td><td><a href=\"bin/$base\">bin/$base</a></td></tr>"
-            done
-            echo '</table>'
-            echo '</body></html>'
-          } > site/index.html
-          head -30 site/index.html
-      - if: steps.resolve.outputs.skip == 'false'
-        name: Write site README
-        run: |
-          cat > site/README.md <<'README'
-          # CtrlIRL-Coder — deb package repository
+            - name: Package arm64 release tarball
+              run: |
+                  set -euo pipefail
+                  mkdir -p dist/pkg-arm64/ctrlirl-coder
+                  cp bin/ctrlirl-coder-linux-arm64 dist/pkg-arm64/ctrlirl-coder/
+                  cp bin/arm64-libsrt.so.1.5 dist/pkg-arm64/ctrlirl-coder/libsrt.so.1.5
+                  cp bin/arm64-build.json dist/pkg-arm64/ctrlirl-coder/build.json
+                  VERSION="${DEB_VERSION#v}"
+                  tar -C dist/pkg-arm64 -czf "dist/ctrlirl-coder-${VERSION}-linux-arm64.tar.gz" ctrlirl-coder
 
-          Single component `main` (release debs), signed with the key at
-          `https://majklovec.github.io/ctrlirl-coder/deb/ctrlirl.asc`:
+            - name: Upload arm64 release deb
+              uses: actions/upload-artifact@v7
+              with:
+                  name: ctrlirl-coder-rel-arm64
+                  path: dist/ctrlirl-coder_*_arm64.deb
+                  if-no-files-found: error
 
-          | Component | Content | Versioning |
-          |---|---|---|
-          | `main` | release debs | release tags (e.g. 1.0.3-1) |
+            - name: Upload arm64 release tarball
+              uses: actions/upload-artifact@v7
+              with:
+                  name: ctrlirl-coder-bin-arm64
+                  path: dist/ctrlirl-coder-*-linux-arm64.tar.gz
+                  if-no-files-found: error
 
-          ```sh
-          sudo mkdir -p /etc/apt/keyrings
-          curl -fsSL https://majklovec.github.io/ctrlirl-coder/deb/ctrlirl.asc -o /etc/apt/keyrings/ctrlirl.asc
-          echo "deb [signed-by=/etc/apt/keyrings/ctrlirl.asc] https://majklovec.github.io/ctrlirl-coder/deb ctrlirl main" | sudo tee /etc/apt/sources.list.d/ctrlirl-coder.list
-          sudo apt-get update
-          sudo apt-get install ctrlirl-coder
-          ```
+    # Deb package repo (GitHub Pages): publish .debs as a static apt-style
+    # repository with a single component, `main` (release debs), in one
+    # Pages deploy (a Pages deploy replaces the whole site):
+    #
+    #   main     — release debs (tag versions, e.g. 1.0.3-1), from the
+    #              latest Release that cut a tag
+    #
+    # Consumers sign-authenticate via the shipped public key:
+    #   curl -fsSL https://majklovec.github.io/ctrlirl-coder/deb/ctrlirl.asc -o /etc/apt/keyrings/ctrlirl.asc
+    #   deb [signed-by=/etc/apt/keyrings/ctrlirl.asc] https://majklovec.github.io/ctrlirl-coder/deb ctrlirl main
+    #
+    # Canonical apt layout: dists/ctrlirl/<component>/binary-<arch>/Packages.gz.
+    # GPG-signed: consumers add the repo with [signed-by=] the shipped
+    # ctrlirl.asc. The main version is monotonic (semver tag), so
+    # `apt upgrade` tracks the newest release.
+    #
+    # Triggers: every green CI push to main, and every successful Release
+    # workflow run. Requires: Settings > Pages > Source = "GitHub Actions".
+    package-repo:
+        name: Publish deb package repo to Pages
+        if: |
+            always() && (
+              (github.event_name == 'workflow_run' &&
+               github.event.workflow == 'ci.yml' &&
+               github.event.workflow_run.conclusion == 'success') ||
+              (github.event_name == 'push' &&
+               github.ref == 'refs/heads/main' &&
+               needs.pure-go.result == 'success' &&
+               needs.bindings.result == 'success' &&
+               (needs.dist-amd64.result == 'success' || needs.dist-amd64.result == 'skipped') &&
+               (needs.dist-arm64.result == 'success' || needs.dist-arm64.result == 'skipped'))
+            )
+        needs: [pure-go, bindings, dist-amd64, dist-arm64]
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            pages: write
+            id-token: write
+        environment:
+            name: github-pages
+            url: ${{ steps.deployment.outputs.page_url }}
+        steps:
+            - name: Resolve debs to publish
+              id: resolve
+              uses: actions/github-script@v9
+              with:
+                  script: |
+                      if (context.eventName === 'workflow_run') {
+                        // Release run: publish its debs under main only when it
+                        // cut a tag.
+                        const pick = (r, keys) => {
+                          let v = r;
+                          for (const k of keys) { if (v && !Array.isArray(v)) v = v[k]; }
+                          return Array.isArray(v) ? v : [];
+                        };
+                        const jobs = pick(await github.rest.actions.listJobsForWorkflowRun({
+                          owner: context.repo.owner,
+                          repo: context.repo.repo,
+                          run_id: context.payload.workflow_run.id,
+                          per_page: 100,
+                        }), ['data', 'jobs']);
+                        const versionJob = jobs.find(j => j.name === 'version');
+                        const newTag = versionJob?.steps
+                          .find(s => s.name === 'Detect release tag' && s.conclusion === 'success')
+                          ?.outputs?.new_tag;
+                        if (!newTag) {
+                          core.info('Release run cut no tag — skipping the Pages repo.');
+                          core.setOutput('skip', 'true');
+                          return;
+                        }
+                        core.setOutput('mode', 'release');
+                      } else {
+                        // CI push: the dist-amd64 job already bundled the latest
+                        // release's debs (main) in one artifact — no run discovery
+                        // needed here.
+                        core.setOutput('mode', 'ci');
+                      }
+                      core.setOutput('skip', 'false');
+            - if: steps.resolve.outputs.skip == 'true'
+              name: Skip
+              run: echo "Nothing to publish."
+            - if: steps.resolve.outputs.skip == 'false'
+              name: Install apt packaging tools
+              run: sudo apt-get update && sudo apt-get install -y dpkg-dev gnupg
+            # Import the release GPG key (armored private key) into the runner's
+            # default keyring; later steps on the same runner reuse it. The signed
+            # Release (InRelease + Release.gpg) is produced in the Build step. The
+            # public key is written to site/deb/ctrlirl.asc so it ships in the
+            # Pages deploy and consumers can [signed-by=] it.
+            - if: steps.resolve.outputs.skip == 'false'
+              name: Import GPG release key
+              env:
+                  CTRLIRL_GPG_KEY: ${{ secrets.CTRLIRL_GPG_KEY }}
+              run: |
+                  set -euo pipefail
+                  [ -n "${CTRLIRL_GPG_KEY:-}" ] || {
+                    echo "secrets.CTRLIRL_GPG_KEY is not set — cannot sign the apt Release.";
+                    echo "Add the release key (armored private key) as a repo secret."; exit 1;
+                  }
+                  printf '%s' "$CTRLIRL_GPG_KEY" > /tmp/ctrlirl-key.asc
+                  gpg --batch --import /tmp/ctrlirl-key.asc
+                  gpg --batch --list-secret-keys
+            - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'ci'
+              name: Download repo artifact
+              uses: actions/download-artifact@v7
+              continue-on-error: true
+              with:
+                  name: ctrlirl-coder-repo
+                  path: repo-src
+            - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'ci'
+              name: Collect main debs (latest release)
+              run: |
+                  set -euo pipefail
+                  mkdir -p debs/main
+                  # the artifact's root is the repo dir; release debs live under repo/main/
+                  if [ -d repo-src/repo ]; then
+                    find repo-src/repo -name '*.deb' -exec cp {} debs/main/ \;
+                  fi
+                  [ -n "$(ls debs/main/*.deb 2>/dev/null)" ] || echo "(no release debs yet — main empty)"
+            - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
+              name: Download release debs (amd64)
+              uses: actions/download-artifact@v7
+              with:
+                  name: ctrlirl-coder-rel-amd64
+                  path: debs/main
+                  run-id: ${{ github.event.workflow_run.id }}
+                  github-token: ${{ secrets.GITHUB_TOKEN }}
+            - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
+              name: Download release debs (arm64)
+              uses: actions/download-artifact@v7
+              with:
+                  name: ctrlirl-coder-rel-arm64
+                  path: debs/main
+                  run-id: ${{ github.event.workflow_run.id }}
+                  github-token: ${{ secrets.GITHUB_TOKEN }}
+            - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
+              name: Download release tarballs (binaries)
+              uses: actions/download-artifact@v7
+              with:
+                  name: ctrlirl-coder-bin-amd64
+                  path: pkgs-amd64
+                  run-id: ${{ github.event.workflow_run.id }}
+                  github-token: ${{ secrets.GITHUB_TOKEN }}
+            - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
+              name: Download release tarballs (arm64)
+              uses: actions/download-artifact@v7
+              with:
+                  name: ctrlirl-coder-bin-arm64
+                  path: pkgs-arm64
+                  run-id: ${{ github.event.workflow_run.id }}
+                  github-token: ${{ secrets.GITHUB_TOKEN }}
+            - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
+              name: Extract release binaries to /bin
+              run: |
+                  set -euo pipefail
+                  mkdir -p site/bin
+                  for arch in amd64 arm64; do
+                    tgz=$(ls "pkgs-$arch"/*-linux-$arch.tar.gz 2>/dev/null | head -1)
+                    [ -n "$tgz" ] || { echo "no $arch tarball — skipping"; continue; }
+                    tar -xzf "$tgz" -C /tmp
+                    ver=$(basename "$tgz" | sed -E "s/ctrlirl-coder-([^-]+)-linux-.*\.tar\.gz/\1/")
+                    cp /tmp/ctrlirl-coder/ctrlirl-coder-linux-$arch "site/bin/ctrlirl-coder-$ver-linux-$arch"
+                    cp /tmp/ctrlirl-coder/libsrt.so.1.5 "site/bin/libsrt-$ver.so.1.5"
+                    cp /tmp/ctrlirl-coder/build.json "site/bin/build-$ver.json"
+                    rm -rf /tmp/ctrlirl-coder
+                  done
+                  ls -l site/bin
+            - if: steps.resolve.outputs.skip == 'false'
+              name: Build apt repo (main)
+              run: |
+                  set -euo pipefail
+                  # Canonical apt layout: a single Codename (ctrlirl) with `main` as the
+                  # component. apt resolves dists/ctrlirl/<comp>/binary-<arch>/Packages.gz
+                  # (index under the arch subdir) and joins the Packages Filename: field
+                  # to the REPOSITORY ROOT — so Filename: must be root-relative:
+                  # dists/ctrlirl/<comp>/binary-<arch>/<deb>.
+                  SITE="site/deb"
+                  DIST="$SITE/dists/ctrlirl"
+                  mkdir -p "$DIST"
+                  # Ship the public key so consumers can [signed-by=] it.
+                  gpg --batch --yes --armor --export release@ctrlirl.local > "$SITE/ctrlirl.asc"
+                  : > /tmp/comps
+                  build() {
+                    local comp=$1 srcdir=$2
+                    local COMP="$DIST/$comp"
+                    [ -d "$srcdir" ] || { echo "no debs for $comp — skipping"; return 0; }
+                    for f in "$srcdir"/*.deb; do
+                      [ -e "$f" ] || continue
+                      arch=$(dpkg-deb -f "$f" Architecture)
+                      mkdir -p "$COMP/binary-$arch"
+                      cp "$f" "$COMP/binary-$arch/"
+                    done
+                    # Per-arch Packages: scan each arch subdir from the REPOSITORY ROOT
+                    # so Filename: is root-relative (dists/…/binary-<arch>/<deb>), which
+                    # is what apt joins to the repo root. Scanning from the component
+                    # root instead yields a component-relative Filename: → apt 404s on
+                    # the deb. /dev/null is the (empty) override file — a bare "-" is
+                    # mis-parsed as a path → empty Packages.
+                    for d in "$COMP"/binary-*; do
+                      [ -e "$d" ] || continue
+                      rel=${d#"$SITE"/}
+                      # redirect to $rel/Packages (relative to $SITE after the cd), not
+                      # $d/Packages (only valid from the original CWD).
+                      ( cd "$SITE" && dpkg-scanpackages --multiversion "$rel" /dev/null > "$rel/Packages" 2>/dev/null )
+                      gzip -9f "$d/Packages"
+                    done
+                    echo "$comp" >> /tmp/comps
+                  }
+                  build main debs/main
+                  [ -s /tmp/comps ] || { echo "no components to publish"; exit 1; }
+                  # Signed Release: apt-ftparchive emits the canonical metadata + full
+                  # hash table, then we clear-sign (InRelease) and detached-sign
+                  # (Release.gpg) with the release key. Signing is REQUIRED here — an
+                  # UNAUTHENTICATED Release carrying a hash table makes apt 3.x
+                  # (Ubuntu 26.04 / Pop!_OS) SILENTLY skip the Packages index fetch
+                  # (no candidate). A signed Release is authenticated, so the hash
+                  # table is expected + verified and the index fetches normally.
+                  # Verified end-to-end in a file: repo on apt 3.2.1: signed Release
+                  # -> no "No Hash entry" / "Could not determine Signed-By" warnings,
+                  # index fetched, apt-get install succeeds.
+                  # Public key ships at site/deb/ctrlirl.asc; consumers use that file
+                  # in their source line ([signed-by=/etc/apt/…/ctrlirl.asc]).
+                  cat > /tmp/apt-release.conf <<CONF
+                  APT::FTPArchive::Release::Origin "CtrlIRL";
+                  APT::FTPArchive::Release::Label "ctrlirl-coder";
+                  APT::FTPArchive::Release::Suite "stable";
+                  APT::FTPArchive::Release::Codename "ctrlirl";
+                  APT::FTPArchive::Release::Description "CtrlIRL-Coder live SRT encoder (releases)";
+                  CONF
+                  apt-ftparchive -c /tmp/apt-release.conf release "$DIST" > "$DIST/Release"
+                  gpg --batch --yes --pinentry-mode loopback --passphrase '' \
+                    --clearsign --output "$DIST/InRelease" "$DIST/Release"
+                  gpg --batch --yes --pinentry-mode loopback --passphrase '' \
+                    --detach-sign --output "$DIST/Release.gpg" "$DIST/Release"
+                  ls -lR site
+            - if: steps.resolve.outputs.skip == 'false'
+              name: Write index.html (.deb list)
+              run: |
+                  set -euo pipefail
+                  {
+                    echo '<!DOCTYPE html>'
+                    echo '<html lang="en"><head><meta charset="utf-8">'
+                    echo '<title>CtrlIRL-Coder — deb packages</title>'
+                    echo '<style>'
+                    echo 'body{font-family:system-ui,sans-serif;margin:2rem;max-width:64rem}'
+                    echo 'table{border-collapse:collapse;width:100%}'
+                    echo 'th,td{border:1px solid #ccc;padding:.4rem .7rem;text-align:left}'
+                    echo 'th{background:#f2f2f2}'
+                    echo 'pre{background:#f6f6f6;padding:.8rem;overflow-x:auto}'
+                    echo 'a{color:#0366d6}'
+                    echo '</style></head><body>'
+                    echo '<h1>CtrlIRL-Coder — deb packages</h1>'
+                    echo '<p>Static apt-style repository, GPG-signed — key at <a href="/deb/ctrlirl.asc">/deb/ctrlirl.asc</a>. Published by the CI <code>package-repo</code> job.</p>'
+                    echo '<h2>Package components</h2>'
+                    echo '<table><tr><th>Component</th><th>Content</th><th>Versioning</th></tr>'
+                    echo '<tr><td>main</td><td>release debs</td><td>release tags (e.g. 1.0.3-1)</td></tr></table>'
+                    echo '<h2>Add the repository</h2>'
+                    echo '<pre>sudo mkdir -p /etc/apt/keyrings
+                    curl -fsSL https://majklovec.github.io/ctrlirl-coder/deb/ctrlirl.asc -o /etc/apt/keyrings/ctrlirl.asc
+                    echo "deb [signed-by=/etc/apt/keyrings/ctrlirl.asc] https://majklovec.github.io/ctrlirl-coder/deb ctrlirl main" | sudo tee /etc/apt/sources.list.d/ctrlirl-coder.list
+                    sudo apt-get update
+                    sudo apt-get install ctrlirl-coder</pre>'
+                    echo '<h2>Debs</h2>'
+                    echo '<table><tr><th>Version</th><th>Component</th><th>Architecture</th><th>Size</th><th>File</th></tr>'
+                    for comp in main; do
+                      for f in "site/deb/dists/ctrlirl/$comp"/binary-*/*.deb; do
+                        [ -e "$f" ] || continue
+                        arch=$(basename "$(dirname "$f")" | sed 's/^binary-//')
+                        ver=$(dpkg-deb -f "$f" Version 2>/dev/null || basename "$f" | sed -E 's/^ctrlirl-coder_(.*)_[a-z0-9]+\.deb$/\1/')
+                        size=$(( $(stat -c %s "$f") / 1024 ))
+                        rel=${f#site/}
+                        echo "<tr><td>$ver</td><td>$comp</td><td>$arch</td><td>${size} KiB</td><td><a href=\"$rel\">$rel</a></td></tr>"
+                      done
+                    done
+                    echo '</table>'
+                    echo '<h2>Release binaries (latest)</h2>'
+                    echo '<p>Each binary needs <code>libsrt-&lt;ver&gt;.so.1.5</code> next to it (CERALIVE SRT fork, identity in <code>build-&lt;ver&gt;.json</code>).</p>'
+                    echo '<table><tr><th>Version</th><th>Architecture</th><th>Size</th><th>File</th></tr>'
+                    for f in site/bin/ctrlirl-coder-*; do
+                      [ -e "$f" ] || continue
+                      base=$(basename "$f")
+                      # only release-named binaries (ctrlirl-coder-<ver>-linux-<arch>)
+                      if ! [[ $base =~ ^ctrlirl-coder-([^-]+)-linux-([a-z0-9]+)$ ]]; then
+                        continue
+                      fi
+                      ver=${BASH_REMATCH[1]}
+                      arch=${BASH_REMATCH[2]}
+                      size=$(( $(stat -c %s "$f") / 1024 ))
+                      echo "<tr><td>$ver</td><td>$arch</td><td>${size} KiB</td><td><a href=\"bin/$base\">bin/$base</a></td></tr>"
+                    done
+                    echo '</table>'
+                    echo '</body></html>'
+                  } > site/index.html
+                  head -30 site/index.html
+            - if: steps.resolve.outputs.skip == 'false'
+              name: Write site README
+              run: |
+                  cat > site/README.md <<'README'
+                  # CtrlIRL-Coder — deb package repository
 
-          `sudo apt-get upgrade ctrlirl-coder` follows the newest build of
-          each component.
-          README
-      - if: steps.resolve.outputs.skip == 'false'
-        name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v5
-        with:
-          path: site
-      - if: steps.resolve.outputs.skip == 'false'
-        name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v5
+                  Single component `main` (release debs), signed with the key at
+                  `https://majklovec.github.io/ctrlirl-coder/deb/ctrlirl.asc`:
 
-  # Release: attach the per-arch payloads (debs + binaries + CERALIVE lib)
-  # to the semantic-release draft. Runs only when the version job cut a tag
-  # for this commit.
-  release:
-    name: Release
-    if: needs.version.outputs.new_tag != ''
-    needs: version
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.version.outputs.new_tag }}
+                  | Component | Content | Versioning |
+                  |---|---|---|
+                  | `main` | release debs | release tags (e.g. 1.0.3-1) |
 
-      - uses: actions/setup-go@v7
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: false
+                  ```sh
+                  sudo mkdir -p /etc/apt/keyrings
+                  curl -fsSL https://majklovec.github.io/ctrlirl-coder/deb/ctrlirl.asc -o /etc/apt/keyrings/ctrlirl.asc
+                  echo "deb [signed-by=/etc/apt/keyrings/ctrlirl.asc] https://majklovec.github.io/ctrlirl-coder/deb ctrlirl main" | sudo tee /etc/apt/sources.list.d/ctrlirl-coder.list
+                  sudo apt-get update
+                  sudo apt-get install ctrlirl-coder
+                  ```
 
-      - name: Install GStreamer dev + plugins + CERALIVE build deps
-        run: |
-          for i in 1 2 3; do
-            sudo apt-get update && break
-            sleep 30
-          done || { echo "apt-get update failed after 3 attempts"; exit 1; }
-          for i in 1 2 3; do
-            sudo apt-get install -y --no-install-recommends \
-            gcc g++ cmake pkg-config git dpkg-dev \
-            libglib2.0-dev libgnutls28-dev \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-            gstreamer1.0-tools \
-            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-            gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad \
-            gstreamer1.0-libav gstreamer1.0-x && break
-            sleep 30
-          done || { echo "apt-get install failed after 3 attempts"; exit 1; }
+                  `sudo apt-get upgrade ctrlirl-coder` follows the newest build of
+                  each component.
+                  README
+            - if: steps.resolve.outputs.skip == 'false'
+              name: Upload Pages artifact
+              uses: actions/upload-pages-artifact@v5
+              with:
+                  path: site
+            - if: steps.resolve.outputs.skip == 'false'
+              name: Deploy to GitHub Pages
+              id: deployment
+              uses: actions/deploy-pages@v5
 
-      - name: Build amd64 binary (CERALIVE bundle + embedded identity)
-        run: make dist-amd64
+    # Release only assembles artifacts produced and tested by the two build jobs.
+    release:
+        name: Release
+        if: needs.version.outputs.new_tag != ''
+        needs: [version, dist-amd64, dist-arm64]
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+        steps:
+            - name: Download amd64 deb
+              uses: actions/download-artifact@v7
+              with:
+                  name: ctrlirl-coder-rel-amd64
+                  path: artifacts/amd64
 
-      - name: Vet + test amd64 (full suite against the fork)
-        run: |
-          make vet
-          make test
+            - name: Download arm64 deb
+              uses: actions/download-artifact@v7
+              with:
+                  name: ctrlirl-coder-rel-arm64
+                  path: artifacts/arm64
 
-      - name: SRT stream test (full pipeline vs local listener)
-        run: bash scripts/test-stream.sh
+            - name: Download amd64 binary tarball
+              uses: actions/download-artifact@v7
+              with:
+                  name: ctrlirl-coder-bin-amd64
+                  path: artifacts/amd64
 
-      - name: Integration smoke (layered + full pipelines vs local srtsrc)
-        run: bash scripts/integration-smoke.sh
+            - name: Download arm64 binary tarball
+              uses: actions/download-artifact@v7
+              with:
+                  name: ctrlirl-coder-bin-arm64
+                  path: artifacts/arm64
 
-      - name: Build amd64 .deb
-        run: bash scripts/build-deb.sh --arch amd64 --version "${{ needs.version.outputs.new_tag }}"
-
-      - name: Package amd64 release tarball (binary + CERALIVE lib)
-        run: |
-          set -euo pipefail
-          mkdir -p dist/pkg-amd64/ctrlirl-coder
-          cp bin/ctrlirl-coder-linux-amd64 dist/pkg-amd64/ctrlirl-coder/
-          cp bin/libsrt.so.1.5 dist/pkg-amd64/ctrlirl-coder/libsrt.so.1.5
-          cp bin/build.json dist/pkg-amd64/ctrlirl-coder/
-          tar -C dist/pkg-amd64 -czf "dist/ctrlirl-coder-${TAG#v}-linux-amd64.tar.gz" ctrlirl-coder
-        env:
-          TAG: ${{ needs.version.outputs.new_tag }}
-
-      - name: Build + test arm64 (cross-compile)
-        run: |
-          set -euo pipefail
-          sudo dpkg --add-architecture arm64
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            libglib2.0-dev:arm64 libgnutls28-dev:arm64 \
-            libgstreamer1.0-dev:arm64 libgstreamer-plugins-base1.0-dev:arm64
-          bash scripts/build-ceralive-srt.sh --arch arm64 --out "$PWD/.build/ceralive-srt/arm64"
-          BUNDLE="$PWD/.build/ceralive-srt/arm64"
-          sha=$(sed -n 's/.*"lib_sha256": "\([0-9a-f]*\)\.*/\1/p' "$BUNDLE/build.json")
-          src=$(sed -n 's/.*"source_sha": "\([0-9a-f]*\)$.*/\1/p' "$BUNDLE/build.json")
-          CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
-            PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
-            CGO_CFLAGS="-I$BUNDLE/include" \
-            RPATH='$ORIGIN' \
-            CGO_LDFLAGS="-L$BUNDLE/lib -lsrt -Wl,-rpath,$RPATH -Wl,--enable-new-dtags" \
-            go build -ldflags "-X ctrlirl-coder/internal/sinks/srt.ceraliveLibSHA256=$sha -X ctrlirl-coder/internal/sinks/srt.ceraliveSourceSHA=$src" \
-            -o bin/ctrlirl-coder-linux-arm64 ./cmd/ctrlirl-coder
-          libfile=$(sed -n 's/.*"lib_file": "\([^"]*\)".*/\1/p' "$BUNDLE/build.json"); cp "$BUNDLE/$libfile" bin/arm64-libsrt.so.1.5
-          cp "$BUNDLE/build.json" bin/arm64-build.json
-
-      - name: Build arm64 .deb
-        run: bash scripts/build-deb.sh --arch arm64 --version "${{ needs.version.outputs.new_tag }}"
-
-      - name: Package arm64 release tarball (binary + CERALIVE lib)
-        run: |
-          set -euo pipefail
-          mkdir -p dist/pkg-arm64/ctrlirl-coder
-          cp bin/ctrlirl-coder-linux-arm64 dist/pkg-arm64/ctrlirl-coder/
-          cp bin/arm64-libsrt.so.1.5 dist/pkg-arm64/ctrlirl-coder/libsrt.so.1.5
-          cp bin/arm64-build.json dist/pkg-arm64/ctrlirl-coder/build.json
-          tar -C dist/pkg-arm64 -czf "dist/ctrlirl-coder-${TAG#v}-linux-arm64.tar.gz" ctrlirl-coder
-        env:
-          TAG: ${{ needs.version.outputs.new_tag }}
-
-      - name: Upload debs (amd64)
-        uses: actions/upload-artifact@v7
-        with:
-          name: ctrlirl-coder-rel-amd64
-          path: dist/ctrlirl-coder_*_amd64.deb
-      - name: Upload debs (arm64)
-        uses: actions/upload-artifact@v7
-        with:
-          name: ctrlirl-coder-rel-arm64
-          path: dist/ctrlirl-coder_*_arm64.deb
-      - name: Upload tarballs (amd64)
-        uses: actions/upload-artifact@v7
-        with:
-          name: ctrlirl-coder-bin-amd64
-          path: dist/ctrlirl-coder-*-linux-amd64.tar.gz
-      - name: Upload tarballs (arm64)
-        uses: actions/upload-artifact@v7
-        with:
-          name: ctrlirl-coder-bin-arm64
-          path: dist/ctrlirl-coder-*-linux-arm64.tar.gz
-
-      - name: Download release payloads (debs)
-        uses: actions/download-artifact@v8
-        with:
-          name: ctrlirl-coder-rel-amd64
-          path: artifacts
-      - name: Download release payloads (debs arm64)
-        uses: actions/download-artifact@v8
-        with:
-          name: ctrlirl-coder-rel-arm64
-          path: artifacts
-      - name: Download release payloads (tarballs)
-        uses: actions/download-artifact@v8
-        with:
-          name: ctrlirl-coder-bin-amd64
-          path: artifacts
-      - name: Download release payloads (tarballs arm64)
-        uses: actions/download-artifact@v8
-        with:
-          name: ctrlirl-coder-bin-arm64
-          path: artifacts
-
-      - name: Attach assets to the release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ needs.version.outputs.new_tag }}
-          name: Release ${{ needs.version.outputs.new_tag }}
-          files: artifacts/*
-          token: ${{ secrets.GITHUB_TOKEN }}
+            - name: Attach build artifacts to GitHub Release
+              uses: softprops/action-gh-release@v3
+              with:
+                  tag_name: ${{ needs.version.outputs.new_tag }}
+                  name: Release ${{ needs.version.outputs.new_tag }}
+                  files: |
+                      artifacts/amd64/*.deb
+                      artifacts/amd64/*.tar.gz
+                      artifacts/arm64/*.deb
+                      artifacts/arm64/*.tar.gz
+                  token: ${{ secrets.GITHUB_TOKEN }}
