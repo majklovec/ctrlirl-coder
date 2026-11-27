@@ -602,7 +602,7 @@ jobs:
                         arch=$(basename "$(dirname "$f")" | sed 's/^binary-//')
                         ver=$(dpkg-deb -f "$f" Version 2>/dev/null || basename "$f" | sed -E 's/^ctrlirl-coder_(.*)_[a-z0-9]+\.deb$/\1/')
                         size=$(( $(stat -c %s "$f") / 1024 ))
-                        rel=${f#site/}
+                        rel=$(basename "${f#site/}")
                         echo "<tr><td>$ver</td><td>$comp</td><td>$arch</td><td>${size} KiB</td><td><a href=\"$rel\">$rel</a></td></tr>"
                       done
                     done
@@ -621,7 +621,7 @@ jobs:
                       ver=${BASH_REMATCH[1]}
                       arch=${BASH_REMATCH[2]}
                       size=$(( $(stat -c %s "$f") / 1024 ))
-                      echo "<tr><td>$ver</td><td>$arch</td><td>${size} KiB</td><td><a href=\"bin/$base\">bin/$base</a></td></tr>"
+                      echo "<tr><td>$ver</td><td>$arch</td><td>${size} KiB</td><td><a href=\"bin/$base\">$base</a></td></tr>"
                     done
                     echo '</table>'
                     echo '</body></html>'
