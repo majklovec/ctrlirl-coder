@@ -1,3 +1,10 @@
+## [1.2.7](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.6...v1.2.7) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** read main component from published release assets, not run artifacts ([f1463e0](https://github.com/majklovec/ctrlirl-coder/commit/f1463e006ec01cdc6e9255fc410f9b7c5f638560))
+
 ## [1.2.6](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.5...v1.2.6) (2026-11-27)
 
 
