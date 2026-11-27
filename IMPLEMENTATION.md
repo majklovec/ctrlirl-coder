@@ -968,11 +968,12 @@ Still open:
   placed). Fix: the dist-amd64 `Fetch latest published release payload`
   step now also downloads the latest release's `-linux-{amd64,arm64}.tar.gz`
   assets into `repo/bin/` (shipped in the `ctrlirl-coder-repo` artifact),
-  and the CI-mode `Extract latest release binaries` step lays them into
-  `site/bin/`. The extraction sed and the index.html binary regex are now
-  greedy (`ctrlirl-coder-(.+)-linux-<arch>`), so versions with dashes
-  (e.g. `1.2.3-1`) parse, and both fail loud on unparseable names
-  instead of silently emitting mangled filenames.
+  and both publish modes copy the tarballs verbatim into `site/bin/`
+  (no extraction) — the "Release binaries (latest)" table lists the
+  `ctrlirl-coder-<ver>-linux-<arch>.tar.gz` files themselves (the
+  tarball bundles binary + `libsrt.so.1.5` + `build.json`). The index
+  regex is greedy (`ctrlirl-coder-(.+)-linux-<arch>\.tar\.gz`) so
+  versions with dashes (e.g. `1.2.3-1`) parse.
 - **2026-11-27 (Pages deploy: duplicate `github-pages` artifact on job-rerun):**
   `actions/deploy-pages` resolves the site by an artifact **name** in the current
   run. Re-running the `Deploy to GitHub Pages` job in isolation

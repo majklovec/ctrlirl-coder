@@ -443,26 +443,18 @@ jobs:
                     find repo-src/repo -name '*.deb' -exec cp {} debs/main/ \;
                   fi
                   [ -n "$(ls debs/main/*.deb 2>/dev/null)" ] || echo "(no release debs yet - main empty)"
-            # CI-mode publish ships the latest RELEASE's binaries too, otherwise this
+            # CI-mode publish ships the latest RELEASE's tarballs too, otherwise this
             # step's re-deploy wipes site/bin and the "Release binaries" section dies.
             - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'ci'
-              name: Extract latest release binaries
+              name: Collect latest release tarballs
               run: |
                   set -euo pipefail
                   mkdir -p site/bin
                   for tgz in repo-src/repo/bin/ctrlirl-coder-*-linux-*.tar.gz; do
                     [ -e "$tgz" ] || continue
-                    base=$(basename "$tgz")
-                    ver=$(printf '%s\n' "$base" | sed -E "s/^ctrlirl-coder-(.+)-linux-[a-z0-9]+\.tar\.gz$/\1/")
-                    arch=$(printf '%s\n' "$base" | sed -E "s/^ctrlirl-coder-.+-linux-([a-z0-9]+)\.tar\.gz$/\1/")
-                    [ "$ver" != "$base" ] && [ -n "$arch" ] || { echo "unparseable tarball name: $base"; exit 1; }
-                    tar -xzf "$tgz" -C /tmp
-                    cp /tmp/ctrlirl-coder/ctrlirl-coder-linux-$arch "site/bin/ctrlirl-coder-$ver-linux-$arch"
-                    cp /tmp/ctrlirl-coder/libsrt.so.1.5 "site/bin/libsrt-$ver.so.1.5"
-                    cp /tmp/ctrlirl-coder/build.json "site/bin/build-$ver.json"
-                    rm -rf /tmp/ctrlirl-coder
+                    cp "$tgz" site/bin/
                   done
-                  ls -l site/bin
+                  ls -l site/bin || echo "(no release tarballs yet)"
             - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
               name: Download release debs (amd64)
               uses: actions/download-artifact@v7
@@ -496,21 +488,15 @@ jobs:
                   run-id: ${{ github.event.workflow_run.id }}
                   github-token: ${{ secrets.GITHUB_TOKEN }}
             - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
-              name: Extract release binaries to /bin
+              name: Collect release tarballs to /bin
               run: |
                   set -euo pipefail
                   mkdir -p site/bin
                   for arch in amd64 arm64; do
-                    tgz=$(ls "pkgs-$arch"/*-linux-$arch.tar.gz 2>/dev/null | head -1)
-                    [ -n "$tgz" ] || { echo "no $arch tarball - skipping"; continue; }
-                    tar -xzf "$tgz" -C /tmp
-                    # greedy: versions may contain dashes (sed is a no-op on mismatch)
-                    ver=$(basename "$tgz" | sed -E "s/^ctrlirl-coder-(.+)-linux-[a-z0-9]+\.tar\.gz$/\1/")
-                    [ "$ver" != "$(basename "$tgz")" ] || { echo "unparseable tarball name: $tgz"; exit 1; }
-                    cp /tmp/ctrlirl-coder/ctrlirl-coder-linux-$arch "site/bin/ctrlirl-coder-$ver-linux-$arch"
-                    cp /tmp/ctrlirl-coder/libsrt.so.1.5 "site/bin/libsrt-$ver.so.1.5"
-                    cp /tmp/ctrlirl-coder/build.json "site/bin/build-$ver.json"
-                    rm -rf /tmp/ctrlirl-coder
+                    for tgz in "pkgs-$arch"/*-linux-$arch.tar.gz; do
+                      [ -e "$tgz" ] || { echo "no $arch tarball - skipping"; continue; }
+                      cp "$tgz" site/bin/
+                    done
                   done
                   ls -l site/bin
             - if: steps.resolve.outputs.skip == 'false'
@@ -622,14 +608,14 @@ jobs:
                     done
                     echo '</table>'
                     echo '<h2>Release binaries (latest)</h2>'
-                    echo '<p>Each binary needs <code>libsrt-&lt;ver&gt;.so.1.5</code> next to it (CERALIVE SRT fork, identity in <code>build-&lt;ver&gt;.json</code>).</p>'
+                    echo '<p>Each tarball bundles the binary + <code>libsrt.so.1.5</code> (CERALIVE SRT fork) + <code>build.json</code> (identity); extract and run the binary from the same directory.</p>'
                     echo '<table><tr><th>Version</th><th>Architecture</th><th>Size</th><th>File</th></tr>'
-                    for f in site/bin/ctrlirl-coder-*; do
+                    for f in site/bin/ctrlirl-coder-*.tar.gz; do
                       [ -e "$f" ] || continue
                       base=$(basename "$f")
-                      # only release-named binaries (ctrlirl-coder-<ver>-linux-<arch>);
+                      # release-named tarballs (ctrlirl-coder-<ver>-linux-<arch>.tar.gz);
                       # greedy (so versions may contain dashes, e.g. 1.2.3-1)
-                      if ! [[ $base =~ ^ctrlirl-coder-(.+)-linux-([a-z0-9]+)$ ]]; then
+                      if ! [[ $base =~ ^ctrlirl-coder-(.+)-linux-([a-z0-9]+)\.tar\.gz$ ]]; then
                         continue
                       fi
                       ver=${BASH_REMATCH[1]}
