@@ -1,3 +1,10 @@
+## [1.2.12](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.11...v1.2.12) (2026-11-27)
+
+
+### Performance Improvements
+
+* **ci:** run dist-amd64 + dist-arm64 in parallel ([79ca855](https://github.com/majklovec/ctrlirl-coder/commit/79ca85548bc41442b19e9bb06a2f3f54556f22d8))
+
 ## [1.2.11](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.10...v1.2.11) (2026-11-27)
 
 
