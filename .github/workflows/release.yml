@@ -35,18 +35,27 @@ jobs:
                       @semantic-release/github
 
             - name: Semantic versioning (semantic-release)
-              id: semver
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              run: |
-                  npx --yes semantic-release@24
+              run: npx --yes semantic-release@24
 
-                  # Detect whether this push was released: semantic-release
-                  # tags HEAD.
+            # Detect whether this push was released: semantic-release tags
+            # HEAD. Commits without a bump (e.g. docs) leave no tag on HEAD
+            # and exit 1 — the run shows the version job as failed, but the
+            # dist/release jobs (gated on new_tag) are skipped, which is the
+            # standard semantic-release-in-CI behavior.
+            - name: Detect release tag
+              if: always()
+              id: semver
+              run: |
                   git fetch --force --tags
                   TAG="$(git describe --tags --abbrev=0 HEAD 2>/dev/null || true)"
                   if [ -n "$TAG" ] && [ "$(git rev-parse "$TAG^{commit}")" = "$(git rev-parse HEAD)" ]; then
                     echo "new_tag=${TAG}" >> "$GITHUB_OUTPUT"
+                    echo "Release $TAG cut."
+                  else
+                    echo "new_tag=" >> "$GITHUB_OUTPUT"
+                    echo "No version bump needed for this commit — skipping release."
                   fi
 
     # Native amd64: build the CERALIVE SRT bundle + binary, run the full test
