@@ -227,8 +227,13 @@ jobs:
               }
               core.setOutput('source_run_id', String(context.payload.workflow_run.id));
             } else {
-              // CI push: main-ci from this run; main from the latest
-              // successful Release run that cut a tag.
+              // CI push: main-ci from this run; main from the latest Release
+              // run whose version job tagged HEAD. No 'completed' filter —
+              // CI and Release push-runs start together, and a Release run's
+              // tag is known as soon as its ~30 s version job finishes,
+              // long before the run completes. The step output is present
+              // even if a run later fails; a failed version job simply has
+              // no output, so a failed release never publishes.
               const runs = await github.paginate(
                 github.rest.actions.listWorkflowRuns,
                 {
@@ -236,13 +241,11 @@ jobs:
                   repo: context.repo.repo,
                   workflow_id: 'release.yml',
                   branch: 'main',
-                  status: 'completed',
                   per_page: 100,
                 }
               );
               let latestTag = '';
               for (const run of runs) {
-                if (run.conclusion !== 'success') continue;
                 const jobs = await github.rest.actions.listJobsForWorkflowRun({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
