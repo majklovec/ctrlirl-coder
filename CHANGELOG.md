@@ -1,3 +1,10 @@
+## [1.0.3](https://github.com/majklovec/ctrlirl-coder/compare/v1.0.2...v1.0.3) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** no-bump commits skip release jobs (detect step, always()) ([3000b05](https://github.com/majklovec/ctrlirl-coder/commit/3000b05c0e1a8523f985965fee4b8bcbfc53e794))
+
 ## [1.0.2](https://github.com/majklovec/ctrlirl-coder/compare/v1.0.1...v1.0.2) (2026-11-26)
 
 
