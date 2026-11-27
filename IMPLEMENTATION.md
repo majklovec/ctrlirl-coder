@@ -853,6 +853,13 @@ Still open:
   so the smoke step no-ops when qemu is absent. **The Pages repo part of
   this was later removed** ("no need of github pages") — see the entry
   below.
+- **2026-11-27 (Pages main-ci missing this-run debs):** the
+  `ctrlirl-coder-repo` artifact's root is the repo working dir (upload
+  LCA of `dist/*.deb` + `repo/`), so this run's debs live at
+  `repo-src/dist/`, not `repo-src/`. The split step's `find -maxdepth 1`
+  found nothing and main-ci silently contained only the arm64 CI deb.
+  The find now scans all depths, excluding `repo-src/repo/` (the latest
+  release's debs, which go to main only).
 - **2026-11-27 (CI first-frame flakes: serialize dist jobs + retry
   filter test):** the `dist-amd64` and `dist-arm64` jobs built GStreamer
   stacks concurrently on separate 2-vCPU runners while the Release job

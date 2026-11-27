@@ -481,7 +481,9 @@ jobs:
           mkdir -p debs/main-ci debs/main
           # root files = this run amd64 (main-ci); repo/ = latest release (main)
           if [ -d repo-src ]; then
-            find repo-src -maxdepth 1 -name '*.deb' -exec cp {} debs/main-ci/ \;
+            # the artifact's root is the repo dir (LCA of deb + repo/), so the
+            # CI debs land under repo-src/dist/ — scan all depths except repo/
+            find repo-src -name '*.deb' -not -path 'repo-src/repo/*' -exec cp {} debs/main-ci/ \;
           fi
           if [ -d deb-ci-arm64 ]; then cp -n deb-ci-arm64/*.deb debs/main-ci/; fi
           if [ -d repo-src/repo ]; then
