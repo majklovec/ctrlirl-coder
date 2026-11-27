@@ -853,6 +853,11 @@ Still open:
   so the smoke step no-ops when qemu is absent. **The Pages repo part of
   this was later removed** ("no need of github pages") — see the entry
   below.
+- **2026-11-27 (main component held back by dist flakes):** the
+  latest-release scan required whole-run `conclusion: success`, so a
+  release whose Release job published fine got ignored whenever a dist
+  job flaked (which kept happening on 2-vCPU runners). It now keys on
+  the Release job's conclusion alone.
 - **2026-11-27 (Pages main-ci missing this-run debs):** the
   `ctrlirl-coder-repo` artifact's root is the repo working dir (upload
   LCA of `dist/*.deb` + `repo/`), so this run's debs live at

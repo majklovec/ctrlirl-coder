@@ -204,21 +204,22 @@ jobs:
               for (const k of keys) { if (v && !Array.isArray(v)) v = v[k]; }
               return Array.isArray(v) ? v : [];
             };
-            // The `main` component carries the latest *successful*
-            // release's debs: a stale/failed run (e.g. a tag cut but the
-            // build cancelled by a newer push) never propagates.
+            // The `main` component carries the latest *published* release's
+            // debs: the Release job must have succeeded (whole-run success is
+            // not required — a dist-job flake must not hold main back).
             const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
               owner: context.repo.owner, repo: context.repo.repo,
               workflow_id: 'ci.yml', branch: 'main',
               status: 'completed', per_page: 100,
             });
             for (const run of runs) {
-              if (run.conclusion !== 'success') continue;
               const jobResp = await github.rest.actions.listJobsForWorkflowRun({
                 owner: context.repo.owner, repo: context.repo.repo,
                 run_id: run.id, per_page: 100,
               });
               const jobs = pick(jobResp, ['data', 'jobs']);
+              const releaseJob = jobs.find(j => j.name === 'Release');
+              if (releaseJob?.conclusion !== 'success') continue;
               const versionJob = jobs.find(j => j.name === 'version');
               const tag = versionJob?.steps
                 .find(s => s.name === 'Detect release tag' && s.conclusion === 'success')
