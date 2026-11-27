@@ -511,13 +511,13 @@ jobs:
         name: Download release tarballs (binaries)
         uses: actions/download-artifact@v7
         with:
-          name: ctrlirl-coder-tar-amd64
+          name: ctrlirl-coder-bin-amd64
           path: pkgs-amd64
       - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
         name: Download release tarballs (arm64)
         uses: actions/download-artifact@v7
         with:
-          name: ctrlirl-coder-tar-arm64
+          name: ctrlirl-coder-bin-arm64
           path: pkgs-arm64
       - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
         name: Extract release binaries to /bin
@@ -773,20 +773,34 @@ jobs:
       - name: Upload tarballs (amd64)
         uses: actions/upload-artifact@v7
         with:
-          name: ctrlirl-coder-tar-amd64
+          name: ctrlirl-coder-bin-amd64
           path: dist/ctrlirl-coder-*-linux-amd64.tar.gz
       - name: Upload tarballs (arm64)
         uses: actions/upload-artifact@v7
         with:
-          name: ctrlirl-coder-tar-arm64
+          name: ctrlirl-coder-bin-arm64
           path: dist/ctrlirl-coder-*-linux-arm64.tar.gz
 
-      - name: Download release payloads
+      - name: Download release payloads (debs)
         uses: actions/download-artifact@v8
         with:
+          name: ctrlirl-coder-rel-amd64
           path: artifacts
-          pattern: 'ctrlirl-coder-rel-*,ctrlirl-coder-tar-*'
-          merge-multiple: true
+      - name: Download release payloads (debs arm64)
+        uses: actions/download-artifact@v8
+        with:
+          name: ctrlirl-coder-rel-arm64
+          path: artifacts
+      - name: Download release payloads (tarballs)
+        uses: actions/download-artifact@v8
+        with:
+          name: ctrlirl-coder-bin-amd64
+          path: artifacts
+      - name: Download release payloads (tarballs arm64)
+        uses: actions/download-artifact@v8
+        with:
+          name: ctrlirl-coder-bin-arm64
+          path: artifacts
 
       - name: Attach assets to the release
         uses: softprops/action-gh-release@v3
