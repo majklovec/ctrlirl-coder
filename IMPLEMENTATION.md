@@ -853,6 +853,13 @@ Still open:
   so the smoke step no-ops when qemu is absent. **The Pages repo part of
   this was later removed** ("no need of github pages") — see the entry
   below.
+- **2026-11-27 (stale-push release cancellation):** rapid consecutive
+  pushes cancel the earlier Release run's dist jobs mid-build
+  (GitHub cancels superseded runs), so a tag can be cut with an empty
+  release (happened to v1.2.0). Recovery: delete the release + tag and
+  push a commit to re-cut. The cancel-prone window is ~the dist build
+  time; the version job (tag + release draft) finishes in seconds, so
+  only the asset upload gets cancelled.
 - **2026-11-27 (Pages index.html with .deb list):** the
   `package-repo` job now writes `site/index.html` (static, styled) listing
   every published `.deb` (version / component / arch / size / download
