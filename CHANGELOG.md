@@ -4,6 +4,16 @@
 ### Bug Fixes
 
 * **ci:** .data on listWorkflowRuns, apt retry for transient 403/502 mirrors ([71e97e0](https://github.com/majklovec/ctrlirl-coder/commit/71e97e0133bf23020c28de39d9c6ab4c0c5fc3c7))
+* **ci:** apt retry loop bash syntax + typed client .data ([f40c3bc](https://github.com/majklovec/ctrlirl-coder/commit/f40c3bcc9169344be655d9d90ba2301aa15efd6a))
+* **ci:** merge step if-conditions into the step item (schema) ([1855184](https://github.com/majklovec/ctrlirl-coder/commit/18551848a869110ee2afbc411d9b07e0f044f4b5))
+* **ci:** single workflow — version, dist, release, Pages in one ci.yml ([2c36c68](https://github.com/majklovec/ctrlirl-coder/commit/2c36c682509e74fb85232cb12802706fad085478)), closes [action-#release](https://github.com/action-/issues/release)
+
+## [1.2.2](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.1...v1.2.2) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** .data on listWorkflowRuns, apt retry for transient 403/502 mirrors ([71e97e0](https://github.com/majklovec/ctrlirl-coder/commit/71e97e0133bf23020c28de39d9c6ab4c0c5fc3c7))
 * **ci:** merge step if-conditions into the step item (schema) ([1855184](https://github.com/majklovec/ctrlirl-coder/commit/18551848a869110ee2afbc411d9b07e0f044f4b5))
 * **ci:** single workflow — version, dist, release, Pages in one ci.yml ([2c36c68](https://github.com/majklovec/ctrlirl-coder/commit/2c36c682509e74fb85232cb12802706fad085478)), closes [action-#release](https://github.com/action-/issues/release)
 
