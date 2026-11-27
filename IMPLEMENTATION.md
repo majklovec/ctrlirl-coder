@@ -899,6 +899,15 @@ Still open:
   downloaded indexes. The `package-repo` build step now appends a `SHA256:` block
   over every `Packages.gz` (filename relative to the `dists/ctrlirl` dir) after
   writing the `Release`. Verified locally: the warning disappears with the block.
+- **2026-11-27 (Pages deploy: duplicate `github-pages` artifact on job-rerun):**
+  `actions/deploy-pages` resolves the site by an artifact **name** in the current
+  run. Re-running the `Deploy to GitHub Pages` job in isolation
+  (`gh run rerun --failed`) re-uploads a second `github-pages` artifact, and the
+  action then fails with `Multiple artifacts named "github-pages" ... count is 2`
+  — and every further rerun makes it worse. The deploy also occasionally hits a
+  transient `Deployment failed, try again later` on the Pages API side. Both are
+  fixed by a **fresh run** (a new commit → new run id → a single `github-pages`
+  artifact); do not job-rerun the Pages step.
 - **2026-11-27 (main component: Release-job proof, no step outputs):**
   the latest-release scan read the version job's `Detect release tag`
   step `outputs.new_tag` via the REST API, which returns `outputs: null`
