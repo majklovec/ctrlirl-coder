@@ -1,3 +1,10 @@
+## [1.2.4](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.3...v1.2.4) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** split repo artifact at correct depth (dist/ subdir) ([e3d608a](https://github.com/majklovec/ctrlirl-coder/commit/e3d608a8c117d9b374eca958c6fe2f2ffc1f276a))
+
 ## [1.2.3](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.2...v1.2.3) (2026-11-27)
 
 
