@@ -889,10 +889,11 @@ Still open:
   main`. Two latent bugs surfaced building it locally:
   `dpkg-scanpackages <dir> -` treats the bare `-` as the *override file*
   (→ "override file - not found", empty Packages) — use `/dev/null`; and
-  after `cd "$COMP"`, redirecting to `> "$d/Packages"` (the pre-cd absolute
-  path) writes nowhere — redirect to `> "$sub/Packages"` (basename, relative
-  to `$COMP`). Verified: `apt-get update` + `apt-cache policy` resolve the
-  package from a `file:` repo of this exact layout.
+  after a `cd`, redirecting to the pre-cd absolute path writes nowhere —
+  redirect to the basename relative to the new CWD (the step now `cd`s into
+  the repo root `site/deb`, so `> "$rel/Packages"` with `rel` root-relative).
+  Verified: `apt-get update` + `apt-cache policy` + a full `apt-get install`
+  resolve and install the package from a `file:` repo of this exact layout.
 - **2026-11-27 (apt 3.x skips the Packages index for an unsigned Release that
   carries a hash block):** the earlier bullet ("apt Release file needs a SHA256
   hash block") was wrong in the field — adding the `SHA256:` block made apt 3.x
@@ -914,6 +915,19 @@ Still open:
   upgrade path is signing: generate `InRelease` + `Release.gpg` with an OpenPGP
   key, ship the public key, and switch the source line to
   `deb [signed-by=…]` — then the hash tables can be kept (and are expected).
+- **2026-11-27 (apt `Packages` `Filename:` must be relative to the repository
+  root, not the component):** the `package-repo` build step originally ran
+  `dpkg-scanpackages` from the component dir, so `Filename:` came out
+  component-relative (`binary-<arch>/<deb>`). apt joins `Filename:` to the
+  repository **root**, so it requested
+  `…/deb/binary-<arch>/<deb>` (404) even though the file was present and the
+  index was fetched. `apt-get update` + `apt-cache policy` both succeeded
+  (which is why it slipped through) but `apt-get install` 404'd on the deb.
+  Fix: run `dpkg-scanpackages` from the `site/deb` repo root over the
+  root-relative arch dir, so `Filename:` =
+  `dists/ctrlirl/<component>/binary-<arch>/<deb>`. Verified end-to-end in a
+  local `file:` repo: `apt-get install` downloads the deb and `dpkg -l` shows
+  the package installed.
 - **2026-11-27 (Pages deploy: duplicate `github-pages` artifact on job-rerun):**
   `actions/deploy-pages` resolves the site by an artifact **name** in the current
   run. Re-running the `Deploy to GitHub Pages` job in isolation

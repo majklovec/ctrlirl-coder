@@ -522,10 +522,12 @@ jobs:
         run: |
           set -euo pipefail
           # Canonical apt layout: a single Codename (ctrlirl) with `main` as the
-          # component. apt resolves dists/ctrlirl/<comp>/binary-<arch>/Packages.gz,
-          # so the per-arch index must live in the arch subdir and Filename: must
-          # be relative to the component.
-          DIST="site/deb/dists/ctrlirl"
+          # component. apt resolves dists/ctrlirl/<comp>/binary-<arch>/Packages.gz
+          # (index under the arch subdir) and joins the Packages Filename: field
+          # to the REPOSITORY ROOT — so Filename: must be root-relative:
+          # dists/ctrlirl/<comp>/binary-<arch>/<deb>.
+          SITE="site/deb"
+          DIST="$SITE/dists/ctrlirl"
           mkdir -p "$DIST"
           : > /tmp/comps
           build() {
@@ -538,16 +540,18 @@ jobs:
               mkdir -p "$COMP/binary-$arch"
               cp "$f" "$COMP/binary-$arch/"
             done
-            # Per-arch Packages: scan each arch subdir from the component root
-            # so Filename: is relative to the component (binary-<arch>/<deb>),
-            # which is what apt resolves. /dev/null is the (empty) override
-            # file — a bare "-" is mis-parsed as a path → empty Packages.
+            # Per-arch Packages: scan each arch subdir from the REPOSITORY ROOT
+            # so Filename: is root-relative (dists/…/binary-<arch>/<deb>), which
+            # is what apt joins to the repo root. Scanning from the component
+            # root instead yields a component-relative Filename: → apt 404s on
+            # the deb. /dev/null is the (empty) override file — a bare "-" is
+            # mis-parsed as a path → empty Packages.
             for d in "$COMP"/binary-*; do
               [ -e "$d" ] || continue
-              sub=$(basename "$d")
-              # redirect to $sub/Packages (relative to $COMP after the cd), not
-              # $d/Packages (which is only valid from the original CWD).
-              ( cd "$COMP" && dpkg-scanpackages --multiversion "$sub" /dev/null > "$sub/Packages" 2>/dev/null )
+              rel=${d#"$SITE"/}
+              # redirect to $rel/Packages (relative to $SITE after the cd), not
+              # $d/Packages (only valid from the original CWD).
+              ( cd "$SITE" && dpkg-scanpackages --multiversion "$rel" /dev/null > "$rel/Packages" 2>/dev/null )
               gzip -9f "$d/Packages"
             done
             echo "$comp" >> /tmp/comps
