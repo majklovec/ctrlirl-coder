@@ -1,3 +1,10 @@
+## [1.3.7](https://github.com/majklovec/ctrlirl-coder/compare/v1.3.6...v1.3.7) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** hand-roll apt Release; ship uncompressed Packages ([8add17c](https://github.com/majklovec/ctrlirl-coder/commit/8add17c1a967da4ff4c7ba024702eb43bfc19b67))
+
 ## [1.3.6](https://github.com/majklovec/ctrlirl-coder/compare/v1.3.5...v1.3.6) (2026-11-27)
 
 
