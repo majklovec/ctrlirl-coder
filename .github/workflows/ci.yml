@@ -218,19 +218,17 @@ jobs:
                 run_id: run.id, per_page: 100,
               });
               const jobs = pick(jobResp, ['data', 'jobs']);
+              // The Release job only runs (and attaches assets) when the
+              // version job cut a tag, so its success is the release proof.
+              // (Step outputs are not exposed by the REST API, so the tag
+              // cannot be read here — it is not needed for the download.)
               const releaseJob = jobs.find(j => j.name === 'Release');
               if (releaseJob?.conclusion !== 'success') continue;
-              const versionJob = jobs.find(j => j.name === 'version');
-              const tag = versionJob?.steps
-                .find(s => s.name === 'Detect release tag' && s.conclusion === 'success')
-                ?.outputs?.new_tag;
-              if (tag) {
-                core.setOutput('run_id', String(run.id));
-                core.info(`Latest release: ${tag} (run ${run.id})`);
-                return;
-              }
+              core.setOutput('run_id', String(run.id));
+              core.info(`Latest release run: ${run.id}`);
+              return;
             }
-            core.info('No successful release with a tag found yet — main component will be empty.');
+            core.info('No successful Release job found yet — main component will be empty.');
       - if: steps.prev-release.outputs.run_id != ''
         name: Download latest release .debs (main component)
         uses: actions/download-artifact@v7
