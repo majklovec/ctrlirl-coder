@@ -960,6 +960,19 @@ Still open:
   The signed `InRelease` carries `Insecure-Allowed: yes`, so the untrusted
   `*.github.io` host passes the apt 3.x signed-URI security check without a
   CA pin — the same `signed-by` line works everywhere.
+- **2026-11-27 (Pages "Release binaries (latest)" empty in CI-mode publishes):**
+  the `package-repo` job populated `site/bin` only in `release` mode
+  (tarball artifacts from the tag run); every push-to-main publish
+  (`mode = ci`) re-deployed the site **without** `/bin`, so the section
+  rendered an empty table (and wiped binaries a release publish had
+  placed). Fix: the dist-amd64 `Fetch latest published release payload`
+  step now also downloads the latest release's `-linux-{amd64,arm64}.tar.gz`
+  assets into `repo/bin/` (shipped in the `ctrlirl-coder-repo` artifact),
+  and the CI-mode `Extract latest release binaries` step lays them into
+  `site/bin/`. The extraction sed and the index.html binary regex are now
+  greedy (`ctrlirl-coder-(.+)-linux-<arch>`), so versions with dashes
+  (e.g. `1.2.3-1`) parse, and both fail loud on unparseable names
+  instead of silently emitting mangled filenames.
 - **2026-11-27 (Pages deploy: duplicate `github-pages` artifact on job-rerun):**
   `actions/deploy-pages` resolves the site by an artifact **name** in the current
   run. Re-running the `Deploy to GitHub Pages` job in isolation
