@@ -1,3 +1,10 @@
+## [1.3.3](https://github.com/majklovec/ctrlirl-coder/compare/v1.3.2...v1.3.3) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** ship release binaries in ci-mode ([e6e3ed1](https://github.com/majklovec/ctrlirl-coder/commit/e6e3ed1bdfc9c3234986ba828cd1af334da553ff))
+
 ## [1.3.2](https://github.com/majklovec/ctrlirl-coder/compare/v1.3.1...v1.3.2) (2026-11-27)
 
 
