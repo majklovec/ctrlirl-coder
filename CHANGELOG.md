@@ -1,3 +1,10 @@
+## [1.1.1](https://github.com/majklovec/ctrlirl-coder/compare/v1.1.0...v1.1.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** main component from Release runs without completion filter (push-run race) ([cbb3a3e](https://github.com/majklovec/ctrlirl-coder/commit/cbb3a3eeed76fbc1c4dbceca4e0939336591a4b6))
+
 # [1.1.0](https://github.com/majklovec/ctrlirl-coder/compare/v1.0.3...v1.1.0) (2026-11-27)
 
 
