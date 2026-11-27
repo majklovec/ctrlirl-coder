@@ -1,3 +1,10 @@
+## [1.2.10](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.9...v1.2.10) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** add SHA256 hash block to apt Release file ([6d001a1](https://github.com/majklovec/ctrlirl-coder/commit/6d001a1fdbc5b81735f7bde3b5e18de345eca793))
+
 ## [1.2.9](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.8...v1.2.9) (2026-11-27)
 
 
