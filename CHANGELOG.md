@@ -1,6 +1,18 @@
 # [1.2.0](https://github.com/majklovec/ctrlirl-coder/compare/v1.1.2...v1.2.0) (2026-11-27)
 
 
+### Bug Fixes
+
+* **ci:** doc the stale-push release cancellation window; re-cut v1.2.0 ([6971e5e](https://github.com/majklovec/ctrlirl-coder/commit/6971e5ed8a0722977b51f2e596a0307fc2f168e5))
+
+
+### Features
+
+* **ci:** Pages index.html listing published .debs ([0c10063](https://github.com/majklovec/ctrlirl-coder/commit/0c10063d1f2b2725802b22cea1cbf8402cf2b3d0))
+
+# [1.2.0](https://github.com/majklovec/ctrlirl-coder/compare/v1.1.2...v1.2.0) (2026-11-27)
+
+
 ### Features
 
 * **ci:** Pages index.html listing published .debs ([0c10063](https://github.com/majklovec/ctrlirl-coder/commit/0c10063d1f2b2725802b22cea1cbf8402cf2b3d0))
