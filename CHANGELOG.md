@@ -1,3 +1,10 @@
+## [1.3.4](https://github.com/majklovec/ctrlirl-coder/compare/v1.3.3...v1.3.4) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** ship release tarballs in pages bin ([b398c82](https://github.com/majklovec/ctrlirl-coder/commit/b398c82a48fc0a89a02cdc8bdbd48036b6837fce))
+
 ## [1.3.3](https://github.com/majklovec/ctrlirl-coder/compare/v1.3.2...v1.3.3) (2026-11-27)
 
 
