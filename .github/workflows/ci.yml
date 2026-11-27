@@ -125,11 +125,12 @@ jobs:
             // If it already finished successfully, the full GStreamer test
             // suite ran there — skip the duplicate CI build. Otherwise
             // (no bump, release in flight, or release failed) build here.
-            const runs = (await github.rest.actions.listWorkflowRuns({
+            const resp = await github.rest.actions.listWorkflowRuns({
               owner: context.repo.owner, repo: context.repo.repo,
               workflow_id: 'ci.yml', event: 'push', branch: 'main',
               status: 'completed', per_page: 100,
-            })).data;
+            });
+            const runs = Array.isArray(resp) ? resp : resp.data;
             for (const run of runs) {
               if (run.head_sha !== context.payload.sha) continue;
               const jobs = (await github.rest.actions.listJobsForWorkflowRun({
@@ -263,11 +264,12 @@ jobs:
             // If it already finished successfully, the full GStreamer test
             // suite ran there — skip the duplicate CI build. Otherwise
             // (no bump, release in flight, or release failed) build here.
-            const runs = (await github.rest.actions.listWorkflowRuns({
+            const resp = await github.rest.actions.listWorkflowRuns({
               owner: context.repo.owner, repo: context.repo.repo,
               workflow_id: 'ci.yml', event: 'push', branch: 'main',
               status: 'completed', per_page: 100,
-            })).data;
+            });
+            const runs = Array.isArray(resp) ? resp : resp.data;
             for (const run of runs) {
               if (run.head_sha !== context.payload.sha) continue;
               const jobs = (await github.rest.actions.listJobsForWorkflowRun({
@@ -319,7 +321,8 @@ jobs:
           CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
             PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
             CGO_CFLAGS="-I$BUNDLE/include" \
-            CGO_LDFLAGS="-L$BUNDLE/lib -lsrt -Wl,-rpath,\$$ORIGIN -Wl,--enable-new-dtags" \
+            RPATH='$ORIGIN' \
+            CGO_LDFLAGS="-L$BUNDLE/lib -lsrt -Wl,-rpath,$RPATH -Wl,--enable-new-dtags" \
             go build -ldflags "-X ctrlirl-coder/internal/sinks/srt.ceraliveLibSHA256=$sha -X ctrlirl-coder/internal/sinks/srt.ceraliveSourceSHA=$src" \
             -o bin/ctrlirl-coder-linux-arm64 ./cmd/ctrlirl-coder
           libfile=$(sed -n 's/.*"lib_file": "\([^"]*\)".*/\1/p' "$BUNDLE/build.json"); cp "$BUNDLE/$libfile" bin/arm64-libsrt.so.1.5
@@ -689,7 +692,8 @@ jobs:
           CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
             PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
             CGO_CFLAGS="-I$BUNDLE/include" \
-            CGO_LDFLAGS="-L$BUNDLE/lib -lsrt -Wl,-rpath,\$$ORIGIN -Wl,--enable-new-dtags" \
+            RPATH='$ORIGIN' \
+            CGO_LDFLAGS="-L$BUNDLE/lib -lsrt -Wl,-rpath,$RPATH -Wl,--enable-new-dtags" \
             go build -ldflags "-X ctrlirl-coder/internal/sinks/srt.ceraliveLibSHA256=$sha -X ctrlirl-coder/internal/sinks/srt.ceraliveSourceSHA=$src" \
             -o bin/ctrlirl-coder-linux-arm64 ./cmd/ctrlirl-coder
           cp "$BUNDLE/$(sed -n 's/.*"lib_file": "\([^"]*\)$.*/\1/p' "$BUNDLE/build.json")" bin/arm64-libsrt.so.1.5
