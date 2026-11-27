@@ -573,7 +573,7 @@ jobs:
                     echo 'a{color:#0366d6}'
                     echo '</style></head><body>'
                     echo '<h1>CtrlIRL-Coder - deb packages</h1>'
-                    echo '<p>Static apt-style repository, GPG-signed - key at <a href="/deb/ctrlirl.asc">/deb/ctrlirl.asc</a>. Published by the CI <code>package-repo</code> job.</p>'
+                    echo '<p>Static apt-style repository, GPG-signed - key at <a href="deb/ctrlirl.asc">deb/ctrlirl.asc</a>. Published by the CI <code>package-repo</code> job.</p>'
                     echo '<h2>Package components</h2>'
                     echo '<table><tr><th>Component</th><th>Content</th><th>Versioning</th></tr>'
                     echo '<tr><td>main</td><td>release debs</td><td>release tags (e.g. 1.0.3-1)</td></tr></table>'
