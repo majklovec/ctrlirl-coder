@@ -1,3 +1,10 @@
+## [1.3.5](https://github.com/majklovec/ctrlirl-coder/compare/v1.3.4...v1.3.5) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** retry Pages deploy on transient artifact fetch ([208a667](https://github.com/majklovec/ctrlirl-coder/commit/208a66736ed90180ddfd0acaca8d1b8f674e7fff))
+
 ## [1.3.4](https://github.com/majklovec/ctrlirl-coder/compare/v1.3.3...v1.3.4) (2026-11-27)
 
 
