@@ -853,6 +853,21 @@ Still open:
   so the smoke step no-ops when qemu is absent. **The Pages repo part of
   this was later removed** ("no need of github pages") — see the entry
   below.
+- **2026-11-27 (single CI workflow: version + dist + release + Pages):**
+  `release.yml` deleted; everything lives in `ci.yml` now — one run per
+  push instead of two overlapping runs (the Release run's dist build raced
+  the CI run and got cancelled, leaving empty releases). Jobs:
+  `version` (semantic-release, main pushes) · `pure-go` · `bindings` ·
+  `dist-amd64`/`dist-arm64` (CI: full test suite + debs, main pushes) ·
+  `release` (only when `new_tag` is set: tag ref checkout, full
+  amd64+arm64 build/test, versioned debs + tarballs,
+  `softprops/action-gh-release`) · `package-repo` (Pages apt repo +
+  index.html + /bin; triggers on green CI pushes and successful
+  `workflow_run` of this same workflow). Anti-duplication: dist jobs run
+  a `skip-check` step — if an earlier run of this workflow for the same
+  HEAD finished with a successful Release job, the CI dist build is
+  skipped (the release already built+tested). Concurrency
+  `cancel-in-progress` per ref keeps one in-flight run per branch.
 - **2026-11-27 (stale-push release cancellation):** rapid consecutive
   pushes cancel the earlier Release run's dist jobs mid-build
   (GitHub cancels superseded runs), so a tag can be cut with an empty

@@ -8,7 +8,62 @@ on:
 env:
   GO_VERSION: "1.26"
 
+
+# One run per commit: a fast-follow push replaces the in-flight run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # Semantic versioning: analyzes conventional commits since the last tag
+  # and, when a bump is warranted, prepends the notes to CHANGELOG.md,
+  # commits it, and publishes the tag + GitHub release draft. Emits new_tag
+  # when the tag lands on HEAD (empty for docs-only commits; semantic-release
+  # exits 1 there, so the detect step records it under always()).
+  version:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      new_tag: ${{ steps.semver.outputs.new_tag }}
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install semantic-release + plugins
+        run: |
+          npm install --no-save \
+            semantic-release@24 \
+            @semantic-release/changelog \
+            @semantic-release/git \
+            @semantic-release/github
+
+      - name: Semantic versioning (semantic-release)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx --yes semantic-release@24
+
+      - name: Detect release tag
+        if: always()
+        id: semver
+        run: |
+          git fetch --force --tags
+          TAG="$(git describe --tags --abbrev=0 HEAD 2>/dev/null || true)"
+          if [ -n "$TAG" ] && [ "$(git rev-parse "$TAG^{commit}")" = "$(git rev-parse HEAD)" ]; then
+            echo "new_tag=${TAG}" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG cut."
+          else
+            echo "new_tag=" >> "$GITHUB_OUTPUT"
+            echo "No version bump needed for this commit — skipping release."
+          fi
+
   # Pure-Go tier: packages with no cgo in their dependency graph. No GStreamer
   # and no CERALIVE needed.
   pure-go:
@@ -54,15 +109,48 @@ jobs:
   dist-amd64:
     name: Build + test amd64, publish
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: version
     runs-on: ubuntu-latest
     env:
       DEB_VERSION: "0.9.${{ github.run_number }}"
     steps:
       - uses: actions/checkout@v7
+      - name: Check release result (skip when the release already built+tested)
+        id: skip-check
+        if: always()
+        uses: actions/github-script@v9
+        with:
+          script: |
+            // The Release job (this run) owns builds for tagged commits.
+            // If it already finished successfully, the full GStreamer test
+            // suite ran there — skip the duplicate CI build. Otherwise
+            // (no bump, release in flight, or release failed) build here.
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner, repo: context.repo.repo,
+              workflow_id: 'ci.yml', event: 'push', branch: 'main',
+              status: 'completed', per_page: 100,
+            });
+            for (const run of runs) {
+              if (run.head_sha !== context.payload.sha) continue;
+              const jobs = (await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner, repo: context.repo.repo,
+                run_id: run.id, per_page: 100,
+              })).data.jobs;
+              const rel = jobs.find(j => j.name === 'Release');
+              if (rel && rel.conclusion === 'success') {
+                core.info('Release succeeded for this commit — skipping the CI dist build.');
+                core.setOutput('do', 'yes');
+                return;
+              }
+              break;
+            }
+            core.setOutput('do', 'no');
+            core.info('Building in CI (no successful release for this commit).');
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
+      - if: steps.skip-check.outputs.do == 'no'
       - name: Install GStreamer dev + plugins + CERALIVE build deps
         run: |
           sudo apt-get update
@@ -74,18 +162,24 @@ jobs:
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad \
             gstreamer1.0-libav gstreamer1.0-x
+      - if: steps.skip-check.outputs.do == 'no'
       - name: Build binary (CERALIVE bundle + embedded identity)
         run: make dist-amd64
+      - if: steps.skip-check.outputs.do == 'no'
       - name: Vet + test (full suite against the fork)
         run: |
           make vet
           make test
+      - if: steps.skip-check.outputs.do == 'no'
       - name: SRT stream test (full pipeline vs local listener)
         run: bash scripts/test-stream.sh
+      - if: steps.skip-check.outputs.do == 'no'
       - name: Integration smoke (layered + full pipelines vs local srtsrc)
         run: bash scripts/integration-smoke.sh
+      - if: steps.skip-check.outputs.do == 'no'
       - name: Build amd64 .deb
         run: bash scripts/build-deb.sh --arch amd64 --version "$DEB_VERSION"
+      - if: steps.skip-check.outputs.do == 'no'
       - name: Find latest successful release (main component)
         id: prev-release
         uses: actions/github-script@v9
@@ -96,7 +190,7 @@ jobs:
             // build cancelled by a newer push) never propagates.
             const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
               owner: context.repo.owner, repo: context.repo.repo,
-              workflow_id: 'release.yml', branch: 'main',
+              workflow_id: 'ci.yml', branch: 'main',
               status: 'completed', per_page: 100,
             });
             for (const run of runs) {
@@ -133,6 +227,7 @@ jobs:
       # The repo artifact carries main-ci (this run's debs, at the root)
       # and main (latest successful release debs, under repo/) together,
       # so a single Page deploy always has both components.
+      - if: steps.skip-check.outputs.do == 'no'
       - name: Upload repo artifact (main-ci + main)
         uses: actions/upload-artifact@v7
         with:
@@ -145,15 +240,48 @@ jobs:
   dist-arm64:
     name: Build + test arm64 (cross), publish
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: version
     runs-on: ubuntu-latest
     env:
       DEB_VERSION: "0.9.${{ github.run_number }}"
     steps:
       - uses: actions/checkout@v7
+      - name: Check release result (skip when the release already built+tested)
+        id: skip-check
+        if: always()
+        uses: actions/github-script@v9
+        with:
+          script: |
+            // The Release job (this run) owns builds for tagged commits.
+            // If it already finished successfully, the full GStreamer test
+            // suite ran there — skip the duplicate CI build. Otherwise
+            // (no bump, release in flight, or release failed) build here.
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner, repo: context.repo.repo,
+              workflow_id: 'ci.yml', event: 'push', branch: 'main',
+              status: 'completed', per_page: 100,
+            });
+            for (const run of runs) {
+              if (run.head_sha !== context.payload.sha) continue;
+              const jobs = (await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner, repo: context.repo.repo,
+                run_id: run.id, per_page: 100,
+              })).data.jobs;
+              const rel = jobs.find(j => j.name === 'Release');
+              if (rel && rel.conclusion === 'success') {
+                core.info('Release succeeded for this commit — skipping the CI dist build.');
+                core.setOutput('do', 'yes');
+                return;
+              }
+              break;
+            }
+            core.setOutput('do', 'no');
+            core.info('Building in CI (no successful release for this commit).');
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
+      - if: steps.skip-check.outputs.do == 'no'
       - name: Install arm64 cross toolchain + GStreamer + gnuTLS multiarch dev
         run: |
           sudo dpkg --add-architecture arm64
@@ -170,8 +298,10 @@ jobs:
           # availability varies across runner images).
           sudo apt-get install -y --no-install-recommends qemu-user-static \
             || echo "warn: qemu-user-static unavailable; smoke will be skipped"
+      - if: steps.skip-check.outputs.do == 'no'
       - name: Build CERALIVE SRT bundle (arm64 cross)
         run: bash scripts/build-ceralive-srt.sh --arch arm64 --out "$PWD/.build/ceralive-srt/arm64"
+      - if: steps.skip-check.outputs.do == 'no'
       - name: Cross-compile arm64 binary against the fork
         run: |
           # Absolute paths: cgo compiles in a temp dir, so relative -I/-L
@@ -187,6 +317,7 @@ jobs:
             -o bin/ctrlirl-coder-linux-arm64 ./cmd/ctrlirl-coder
           libfile=$(sed -n 's/.*"lib_file": "\([^"]*\)".*/\1/p' "$BUNDLE/build.json"); cp "$BUNDLE/$libfile" bin/arm64-libsrt.so.1.5
           cp "$BUNDLE/build.json" bin/arm64-build.json
+      - if: steps.skip-check.outputs.do == 'no'
       - name: Smoke test under qemu-user (boot, CERALIVE guard, contract)
         run: |
           if ! command -v qemu-aarch64-static >/dev/null 2>&1; then
@@ -204,6 +335,7 @@ jobs:
             --pipeline pipeline/example-full.pipeline \
             --scene scene.example.json \
             --dry-run
+      - if: steps.skip-check.outputs.do == 'no'
       - name: Build arm64 .deb
         run: bash scripts/build-deb.sh --arch arm64 --version "$DEB_VERSION"
       # The main component is refreshed by the amd64 job (it downloads both
@@ -231,7 +363,7 @@ jobs:
     name: Publish deb package repo to Pages
     if: |
       (github.event_name == 'workflow_run' &&
-       github.event.workflow == 'Release' &&
+       github.event.workflow == 'ci.yml' &&
        github.event.workflow_run.conclusion == 'success') ||
       (github.event_name == 'push' &&
        github.ref == 'refs/heads/main' &&
@@ -467,3 +599,130 @@ jobs:
         name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
+
+  # Release: attach the per-arch payloads (debs + binaries + CERALIVE lib)
+  # to the semantic-release draft. Runs only when the version job cut a tag
+  # for this commit.
+  release:
+    name: Release
+    if: needs.version.outputs.new_tag != ''
+    needs: version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.new_tag }}
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Install GStreamer dev + plugins + CERALIVE build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc g++ cmake pkg-config git dpkg-dev \
+            libglib2.0-dev libgnutls28-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-tools \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad \
+            gstreamer1.0-libav gstreamer1.0-x
+
+      - name: Build amd64 binary (CERALIVE bundle + embedded identity)
+        run: make dist-amd64
+
+      - name: Vet + test amd64 (full suite against the fork)
+        run: |
+          make vet
+          make test
+
+      - name: SRT stream test (full pipeline vs local listener)
+        run: bash scripts/test-stream.sh
+
+      - name: Integration smoke (layered + full pipelines vs local srtsrc)
+        run: bash scripts/integration-smoke.sh
+
+      - name: Build amd64 .deb
+        run: bash scripts/build-deb.sh --arch amd64 --version "${{ needs.version.outputs.new_tag }}"
+
+      - name: Package amd64 release tarball (binary + CERALIVE lib)
+        run: |
+          set -euo pipefail
+          mkdir -p dist/pkg-amd64/ctrlirl-coder
+          cp bin/ctrlirl-coder-linux-amd64 dist/pkg-amd64/ctrlirl-coder/
+          cp bin/libsrt.so.1.5 dist/pkg-amd64/ctrlirl-coder/libsrt.so.1.5
+          cp bin/build.json dist/pkg-amd64/ctrlirl-coder/
+          tar -C dist/pkg-amd64 -czf "dist/ctrlirl-coder-${TAG#v}-linux-amd64.tar.gz" ctrlirl-coder
+        env:
+          TAG: ${{ needs.version.outputs.new_tag }}
+
+      - name: Build + test arm64 (cross-compile)
+        run: |
+          set -euo pipefail
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            libglib2.0-dev:arm64 libgnutls28-dev:arm64 \
+            libgstreamer1.0-dev:arm64 libgstreamer-plugins-base1.0-dev:arm64
+          bash scripts/build-ceralive-srt.sh --arch arm64 --out "$PWD/.build/ceralive-srt/arm64"
+          BUNDLE="$PWD/.build/ceralive-srt/arm64"
+          sha=$(sed -n 's/.*"lib_sha256": "\([0-9a-f]*\)\.*/\1/p' "$BUNDLE/build.json")
+          src=$(sed -n 's/.*"source_sha": "\([0-9a-f]*\)$.*/\1/p' "$BUNDLE/build.json")
+          CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
+            PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
+            CGO_CFLAGS="-I$BUNDLE/include" \
+            CGO_LDFLAGS="-L$BUNDLE/lib -lsrt -Wl,-rpath,\$$ORIGIN -Wl,--enable-new-dtags" \
+            go build -ldflags "-X ctrlirl-coder/internal/sinks/srt.ceraliveLibSHA256=$sha -X ctrlirl-coder/internal/sinks/srt.ceraliveSourceSHA=$src" \
+            -o bin/ctrlirl-coder-linux-arm64 ./cmd/ctrlirl-coder
+          cp "$BUNDLE/$(sed -n 's/.*"lib_file": "\([^"]*\)$.*/\1/p' "$BUNDLE/build.json")" bin/arm64-libsrt.so.1.5
+          cp "$BUNDLE/build.json" bin/arm64-build.json
+
+      - name: Build arm64 .deb
+        run: bash scripts/build-deb.sh --arch arm64 --version "${{ needs.version.outputs.new_tag }}"
+
+      - name: Package arm64 release tarball (binary + CERALIVE lib)
+        run: |
+          set -euo pipefail
+          mkdir -p dist/pkg-arm64/ctrlirl-coder
+          cp bin/ctrlirl-coder-linux-arm64 dist/pkg-arm64/ctrlirl-coder/
+          cp bin/arm64-libsrt.so.1.5 dist/pkg-arm64/ctrlirl-coder/libsrt.so.1.5
+          cp bin/arm64-build.json dist/pkg-arm64/ctrlirl-coder/build.json
+          tar -C dist/pkg-arm64 -czf "dist/ctrlirl-coder-${TAG#v}-linux-arm64.tar.gz" ctrlirl-coder
+        env:
+          TAG: ${{ needs.version.outputs.new_tag }}
+
+      - name: Upload release payload (amd64)
+        uses: actions/upload-artifact@v7
+        with:
+          name: ctrlirl-coder-amd64
+          path: |
+            dist/ctrlirl-coder_*_amd64.deb
+            dist/ctrlirl-coder-*-linux-amd64.tar.gz
+
+      - name: Upload release payload (arm64)
+        uses: actions/upload-artifact@v7
+        with:
+          name: ctrlirl-coder-arm64
+          path: |
+            dist/ctrlirl-coder_*_arm64.deb
+            dist/ctrlirl-coder-*-linux-arm64.tar.gz
+
+      - name: Download release payloads
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: ctrlirl-coder-*
+          merge-multiple: true
+
+      - name: Attach assets to the release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.version.outputs.new_tag }}
+          name: Release ${{ needs.version.outputs.new_tag }}
+          files: artifacts/*
+          token: ${{ secrets.GITHUB_TOKEN }}
