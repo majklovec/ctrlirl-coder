@@ -1,3 +1,10 @@
+## [1.1.2](https://github.com/majklovec/ctrlirl-coder/compare/v1.1.1...v1.1.2) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** upload-pages-artifact v5, deploy-pages v5 (Node 20 deprecation) ([f9a27c7](https://github.com/majklovec/ctrlirl-coder/commit/f9a27c7fe764c8dd6db4fbb2c2a6c4de33483fad))
+
 ## [1.1.1](https://github.com/majklovec/ctrlirl-coder/compare/v1.1.0...v1.1.1) (2026-11-27)
 
 
