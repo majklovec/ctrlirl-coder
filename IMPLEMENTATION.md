@@ -911,10 +911,10 @@ Still open:
   hash-less `Release` (Origin/Label/Suite/Codename/Architectures/Components/
   Description/Date), which is the format that reliably installed before the
   block was added. The resulting `W: No Hash entry in Release file` line is
-  cosmetic-only because the source line uses `[trusted=yes]`. The proper
-  upgrade path is signing: generate `InRelease` + `Release.gpg` with an OpenPGP
-  key, ship the public key, and switch the source line to
-  `deb [signed-by=…]` — then the hash tables can be kept (and are expected).
+  cosmetic-only while the source line uses a weak trust. **Done:** the
+  repo is now GPG-signed (`InRelease` + `Release.gpg`, `signed-by` source
+  line, real hash tables back) — see the "apt Release is GPG-signed" item
+  in this section.
 - **2026-11-27 (apt `Packages` `Filename:` must be relative to the repository
   root, not the component):** the `package-repo` build step originally ran
   `dpkg-scanpackages` from the component dir, so `Filename:` came out
@@ -928,6 +928,34 @@ Still open:
   `dists/ctrlirl/<component>/binary-<arch>/<deb>`. Verified end-to-end in a
   local `file:` repo: `apt-get install` downloads the deb and `dpkg -l` shows
   the package installed.
+- **2026-11-27 (apt Release is GPG-signed; `[trusted=yes]` is gone):** the
+  `Build apt repo (main)` step now emits a real Release with
+  `apt-ftparchive -c /tmp/apt-release.conf release` (metadata from
+  `APT::FTPArchive::Release::*`; `Architectures`/`Components` auto-detected
+  from the `Packages` files) and signs it: `gpg --clearsign → InRelease` +
+  `gpg --detach-sign → Release.gpg`. Signing is the proper fix for the apt
+  3.x hash-skip gotcha above — an *authenticated* Release **with** its hash
+  table is consumed normally; only *unsigned*-with-hash releases are
+  skipped. The release key is `CtrlIRL-Coder Release <release@ctrlirl.local>`,
+  fingerprint **`23BDBB59E5D5C21E327B5620E10DFC1CECEDAAA9`** (RSA-4096,
+  expires 2036). The **private** key lives in the GitHub secret
+  **`CTRLIRL_GPG_KEY`** (armored), imported by the `Import GPG release key`
+  step in both the push and release-run `package-repo` jobs; the **public**
+  key is exported to `site/deb/ctrlirl.asc` →
+  `https://majklovec.github.io/ctrlirl-coder/deb/ctrlirl.asc`. Consumers use
+  a `signed-by` keyring:
+  ```sh
+  sudo mkdir -p /etc/apt/keyrings
+  curl -fsSL https://majklovec.github.io/ctrlirl-coder/deb/ctrlirl.asc \
+    -o /etc/apt/keyrings/ctrlirl.asc
+  echo "deb [signed-by=/etc/apt/keyrings/ctrlirl.asc] \
+    https://majklovec.github.io/ctrlirl-coder/deb ctrlirl main" \
+    | sudo tee /etc/apt/sources.list.d/ctrlirl-coder.list
+  sudo apt-get update && sudo apt-get install ctrlirl-coder
+  ```
+  The signed `InRelease` carries `Insecure-Allowed: yes`, so the untrusted
+  `*.github.io` host passes the apt 3.x signed-URI security check without a
+  CA pin — the same `signed-by` line works everywhere.
 - **2026-11-27 (Pages deploy: duplicate `github-pages` artifact on job-rerun):**
   `actions/deploy-pages` resolves the site by an artifact **name** in the current
   run. Re-running the `Deploy to GitHub Pages` job in isolation

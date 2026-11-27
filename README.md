@@ -152,17 +152,20 @@ make deb-arm64
 ### Installing from the deb package repo (GitHub Pages)
 
 The CI `package-repo` job publishes `.deb` builds as a static apt repository
-on GitHub Pages with two components:
+on GitHub Pages:
 
 | Component | Content | Versioning |
 |---|---|---|
-| `main` | release debs | release tags (e.g. `1.0.3-1`) |
-| `main-ci` | every green CI build on `main` | run number (`0.9.N-1`) |
+| `main` | release debs (amd64 + arm64) | release tags (e.g. `1.0.3-1`) |
 
-The repo is unsigned — add it with `[trusted=yes]`:
+The repo is GPG-signed — import the key, then add it with `signed-by`:
 
 ```sh
-echo "deb [trusted=yes] https://majklovec.github.io/ctrlirl-coder/deb/dists main main-ci" \
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://majklovec.github.io/ctrlirl-coder/deb/ctrlirl.asc \
+  -o /etc/apt/keyrings/ctrlirl.asc
+echo "deb [signed-by=/etc/apt/keyrings/ctrlirl.asc] \
+  https://majklovec.github.io/ctrlirl-coder/deb ctrlirl main" \
   | sudo tee /etc/apt/sources.list.d/ctrlirl-coder.list
 sudo apt-get update
 sudo apt-get install ctrlirl-coder
