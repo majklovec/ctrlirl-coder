@@ -152,6 +152,8 @@ if [ -z "$VERSION" ]; then
 		VERSION="0.1.0"
 	fi
 fi
+# Strip a leading "v" (git tags are v-prefixed; dpkg versions are not).
+VERSION="${VERSION#v}"
 # dpkg requires the version to start with a digit; a bare git sha (untagged
 # repo) does not — prefix it.
 case "$VERSION" in

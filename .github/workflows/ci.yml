@@ -235,14 +235,14 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           run-id: ${{ steps.prev-release.outputs.run_id }}
-          name: ctrlirl-coder-amd64
+          name: ctrlirl-coder-rel-amd64
           path: repo/main
       - if: steps.prev-release.outputs.run_id != ''
         name: Download latest release .debs arm64 (main component)
         uses: actions/download-artifact@v7
         with:
           run-id: ${{ steps.prev-release.outputs.run_id }}
-          name: ctrlirl-coder-arm64
+          name: ctrlirl-coder-rel-arm64
           path: repo/main
       # The repo artifact carries main-ci (this run's debs, at the root)
       # and main (latest successful release debs, under repo/) together,
@@ -251,7 +251,7 @@ jobs:
         if: steps.skip-check.outputs.do == 'no'
         uses: actions/upload-artifact@v7
         with:
-          name: ctrlirl-coder-debs
+          name: ctrlirl-coder-repo
           path: |
             dist/ctrlirl-coder_*_amd64.deb
             repo/
@@ -366,6 +366,13 @@ jobs:
       - name: Build arm64 .deb
         if: steps.skip-check.outputs.do == 'no'
         run: bash scripts/build-deb.sh --arch arm64 --version "$DEB_VERSION"
+      - if: steps.skip-check.outputs.do == 'no'
+        name: Upload CI arm64 deb
+        uses: actions/upload-artifact@v7
+        with:
+          name: ctrlirl-coder-ci-arm64
+          path: dist/ctrlirl-coder_*_arm64.deb
+          if-no-files-found: error
       # The main component is refreshed by the amd64 job (it downloads both
       # per-arch release .debs and uploads the combined repo artifact).
 
@@ -454,28 +461,45 @@ jobs:
       - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'ci'
         name: Download repo artifact (main-ci + main)
         uses: actions/download-artifact@v7
+        continue-on-error: true
         with:
-          name: ctrlirl-coder-debs
+          name: ctrlirl-coder-repo
           path: repo-src
+      - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'ci'
+        name: Download CI arm64 deb
+        uses: actions/download-artifact@v7
+        continue-on-error: true
+        with:
+          name: ctrlirl-coder-ci-arm64
+          path: deb-ci-arm64
       - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'ci'
         name: Split repo artifact into components
         run: |
           set -euo pipefail
           mkdir -p debs/main-ci debs/main
-          # root files = this run (main-ci), repo/ = latest release (main)
-          find repo-src -maxdepth 1 -name '*.deb' -exec cp {} debs/main-ci/ \;
-          [ -d repo-src/repo ] && find repo-src/repo -name '*.deb' -exec cp {} debs/main/ \;
+          # root files = this run amd64 (main-ci); repo/ = latest release (main)
+          if [ -d repo-src ]; then
+            find repo-src -maxdepth 1 -name '*.deb' -exec cp {} debs/main-ci/ \;
+          fi
+          if [ -d deb-ci-arm64 ]; then cp -n deb-ci-arm64/*.deb debs/main-ci/; fi
+          if [ -d repo-src/repo ]; then
+            find repo-src/repo -name '*.deb' -exec cp {} debs/main/ \;
+            find repo-src/repo -name '*.deb' -exec cp -n {} debs/main-ci/ \;
+          else
+            echo "(no earlier release — main mirrors main-ci)"
+            cp -n debs/main-ci/*.deb debs/main/
+          fi
       - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
         name: Download release debs (amd64)
         uses: actions/download-artifact@v7
         with:
-          name: ctrlirl-coder-amd64
+          name: ctrlirl-coder-rel-amd64
           path: debs/main
       - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
         name: Download release debs (arm64)
         uses: actions/download-artifact@v7
         with:
-          name: ctrlirl-coder-arm64
+          name: ctrlirl-coder-rel-arm64
           path: debs/main
       - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
         name: Copy release debs to main-ci
@@ -487,13 +511,13 @@ jobs:
         name: Download release tarballs (binaries)
         uses: actions/download-artifact@v7
         with:
-          name: ctrlirl-coder-amd64
+          name: ctrlirl-coder-tar-amd64
           path: pkgs-amd64
       - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
         name: Download release tarballs (arm64)
         uses: actions/download-artifact@v7
         with:
-          name: ctrlirl-coder-arm64
+          name: ctrlirl-coder-tar-arm64
           path: pkgs-arm64
       - if: steps.resolve.outputs.skip == 'false' && steps.resolve.outputs.mode == 'release'
         name: Extract release binaries to /bin
@@ -736,27 +760,32 @@ jobs:
         env:
           TAG: ${{ needs.version.outputs.new_tag }}
 
-      - name: Upload release payload (amd64)
+      - name: Upload debs (amd64)
         uses: actions/upload-artifact@v7
         with:
-          name: ctrlirl-coder-amd64
-          path: |
-            dist/ctrlirl-coder_*_amd64.deb
-            dist/ctrlirl-coder-*-linux-amd64.tar.gz
-
-      - name: Upload release payload (arm64)
+          name: ctrlirl-coder-rel-amd64
+          path: dist/ctrlirl-coder_*_amd64.deb
+      - name: Upload debs (arm64)
         uses: actions/upload-artifact@v7
         with:
-          name: ctrlirl-coder-arm64
-          path: |
-            dist/ctrlirl-coder_*_arm64.deb
-            dist/ctrlirl-coder-*-linux-arm64.tar.gz
+          name: ctrlirl-coder-rel-arm64
+          path: dist/ctrlirl-coder_*_arm64.deb
+      - name: Upload tarballs (amd64)
+        uses: actions/upload-artifact@v7
+        with:
+          name: ctrlirl-coder-tar-amd64
+          path: dist/ctrlirl-coder-*-linux-amd64.tar.gz
+      - name: Upload tarballs (arm64)
+        uses: actions/upload-artifact@v7
+        with:
+          name: ctrlirl-coder-tar-arm64
+          path: dist/ctrlirl-coder-*-linux-arm64.tar.gz
 
       - name: Download release payloads
         uses: actions/download-artifact@v8
         with:
           path: artifacts
-          pattern: ctrlirl-coder-*
+          pattern: 'ctrlirl-coder-rel-*,ctrlirl-coder-tar-*'
           merge-multiple: true
 
       - name: Attach assets to the release

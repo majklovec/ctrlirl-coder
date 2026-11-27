@@ -853,6 +853,28 @@ Still open:
   so the smoke step no-ops when qemu is absent. **The Pages repo part of
   this was later removed** ("no need of github pages") — see the entry
   below.
+- **2026-11-27 (release assets + apt repo fixes):** four follow-up bugs
+  from the first green release run: (1) **artifact name shadowing** — the
+  dist jobs and the Release job both uploaded `ctrlirl-coder-amd64` /
+  `ctrlirl-coder-arm64` in the same run, so the Release job's
+  `download-artifact` merged the *dist* amd64 artifact (CI-versioned deb)
+  + the `ctrlirl-coder-debs` repo artifact and attached the wrong files
+  (2 of 4 assets, missing arm64 entirely). Renamed: Release uploads
+  `ctrlirl-coder-rel-{amd64,arm64}` (debs) + `ctrlirl-coder-tar-{amd64,arm64}`
+  (tarballs); its download pattern is
+  `ctrlirl-coder-rel-*,ctrlirl-coder-tar-*`; the repo artifact is now
+  `ctrlirl-coder-repo`. (2) **malformed deb version** —
+  `build-deb.sh --version v1.2.2` produced `0.v1.2.2-1` (the `v` failed the
+  digit check, gaining a `0.` prefix); the script now strips a leading
+  `v` before sanitising, so tag builds are
+  `ctrlirl-coder_1.2.2-1_<arch>.deb`. (3) **split step set -e exit** —
+  the package-repo ci-mode split ended with
+  `[ -d repo-src/repo ] && find ...`, which fails under `set -e` when no
+  earlier release exists (first-ever green release); now an `if` block
+  that mirrors main-ci into main when `repo/` is absent. (4) **main-ci
+  had no arm64 deb** — the dist-arm64 job now uploads
+  `ctrlirl-coder-ci-arm64` and package-repo downloads it into main-ci
+  (debs are per-arch, so main-ci carries both architectures).
 - **2026-11-27 (single CI workflow: version + dist + release + Pages):**
   `release.yml` deleted; everything lives in `ci.yml` now — one run per
   push instead of two overlapping runs (the Release run's dist build raced
