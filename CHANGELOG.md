@@ -1,3 +1,10 @@
+## [1.3.6](https://github.com/majklovec/ctrlirl-coder/compare/v1.3.5...v1.3.6) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** correct Pages index asset links ([227d703](https://github.com/majklovec/ctrlirl-coder/commit/227d703abf269bbb705f3fa46804eccf3b5faf5d))
+
 ## [1.3.5](https://github.com/majklovec/ctrlirl-coder/compare/v1.3.4...v1.3.5) (2026-11-27)
 
 
