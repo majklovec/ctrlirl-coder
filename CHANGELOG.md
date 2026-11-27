@@ -1,3 +1,10 @@
+## [1.2.13](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.12...v1.2.13) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** make Packages Filename: repo-root-relative — apt 404s the deb ([4b37e25](https://github.com/majklovec/ctrlirl-coder/commit/4b37e25ee301c39ac1766fe0358e9f7c0fce8dcd))
+
 ## [1.2.12](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.11...v1.2.12) (2026-11-27)
 
 
