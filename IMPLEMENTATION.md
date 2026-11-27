@@ -867,10 +867,14 @@ Still open:
   *predecessor run's* workflow artifacts (REST run-scan + `download-artifact`
   with `run-id`). That cross-run fetch intermittently 404'd even when the
   artifact existed, failing the whole dist job. `main` now pulls the latest
-  **published GitHub Release** debs from `/releases/latest` assets
-  (permanent, single source, no cross-run artifact dependency); a failed
-  fetch warns instead of failing the run so one flaky release never holds
-  `main` back.
+  **published GitHub Release** debs (permanent, no cross-run artifact
+  dependency). The dist job runs *during* the same run that cuts the tag —
+  semantic-release makes the tag exist before the Release job attaches its
+  assets — so `/releases/latest` mid-run can point at a tag with zero
+  assets. The fetch therefore walks the release list and picks the latest
+  release that actually has `.deb` assets (worst case `main` lags one
+  release until the next run). A failed fetch warns instead of failing the
+  run so one flaky release never holds `main` back.
 - **2026-11-27 (main component: Release-job proof, no step outputs):**
   the latest-release scan read the version job's `Detect release tag`
   step `outputs.new_tag` via the REST API, which returns `outputs: null`
