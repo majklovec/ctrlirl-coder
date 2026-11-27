@@ -1,3 +1,10 @@
+## [1.2.3](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.2...v1.2.3) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** download release payloads by explicit name, not pattern ([ec9b455](https://github.com/majklovec/ctrlirl-coder/commit/ec9b45555854694273941576a607394246e6fe94))
+
 ## [1.2.2](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.1...v1.2.2) (2026-11-27)
 
 
