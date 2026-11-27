@@ -1,3 +1,10 @@
+# [1.3.0](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.13...v1.3.0) (2026-11-27)
+
+
+### Features
+
+* **ci:** sign the apt Release (InRelease/Release.gpg + shipped public key) ([d8ca942](https://github.com/majklovec/ctrlirl-coder/commit/d8ca9421bb1fb70424d6fe4a202f6900acc4f3e0))
+
 ## [1.2.13](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.12...v1.2.13) (2026-11-27)
 
 
