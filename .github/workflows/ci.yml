@@ -150,8 +150,8 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
-      - if: steps.skip-check.outputs.do == 'no'
       - name: Install GStreamer dev + plugins + CERALIVE build deps
+        if: steps.skip-check.outputs.do == 'no'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -162,25 +162,25 @@ jobs:
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad \
             gstreamer1.0-libav gstreamer1.0-x
-      - if: steps.skip-check.outputs.do == 'no'
       - name: Build binary (CERALIVE bundle + embedded identity)
+        if: steps.skip-check.outputs.do == 'no'
         run: make dist-amd64
-      - if: steps.skip-check.outputs.do == 'no'
       - name: Vet + test (full suite against the fork)
+        if: steps.skip-check.outputs.do == 'no'
         run: |
           make vet
           make test
-      - if: steps.skip-check.outputs.do == 'no'
       - name: SRT stream test (full pipeline vs local listener)
+        if: steps.skip-check.outputs.do == 'no'
         run: bash scripts/test-stream.sh
-      - if: steps.skip-check.outputs.do == 'no'
       - name: Integration smoke (layered + full pipelines vs local srtsrc)
+        if: steps.skip-check.outputs.do == 'no'
         run: bash scripts/integration-smoke.sh
-      - if: steps.skip-check.outputs.do == 'no'
       - name: Build amd64 .deb
+        if: steps.skip-check.outputs.do == 'no'
         run: bash scripts/build-deb.sh --arch amd64 --version "$DEB_VERSION"
-      - if: steps.skip-check.outputs.do == 'no'
       - name: Find latest successful release (main component)
+        if: steps.skip-check.outputs.do == 'no'
         id: prev-release
         uses: actions/github-script@v9
         with:
@@ -227,8 +227,8 @@ jobs:
       # The repo artifact carries main-ci (this run's debs, at the root)
       # and main (latest successful release debs, under repo/) together,
       # so a single Page deploy always has both components.
-      - if: steps.skip-check.outputs.do == 'no'
       - name: Upload repo artifact (main-ci + main)
+        if: steps.skip-check.outputs.do == 'no'
         uses: actions/upload-artifact@v7
         with:
           name: ctrlirl-coder-debs
@@ -281,8 +281,8 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
-      - if: steps.skip-check.outputs.do == 'no'
       - name: Install arm64 cross toolchain + GStreamer + gnuTLS multiarch dev
+        if: steps.skip-check.outputs.do == 'no'
         run: |
           sudo dpkg --add-architecture arm64
           sudo apt-get update
@@ -298,11 +298,11 @@ jobs:
           # availability varies across runner images).
           sudo apt-get install -y --no-install-recommends qemu-user-static \
             || echo "warn: qemu-user-static unavailable; smoke will be skipped"
-      - if: steps.skip-check.outputs.do == 'no'
       - name: Build CERALIVE SRT bundle (arm64 cross)
+        if: steps.skip-check.outputs.do == 'no'
         run: bash scripts/build-ceralive-srt.sh --arch arm64 --out "$PWD/.build/ceralive-srt/arm64"
-      - if: steps.skip-check.outputs.do == 'no'
       - name: Cross-compile arm64 binary against the fork
+        if: steps.skip-check.outputs.do == 'no'
         run: |
           # Absolute paths: cgo compiles in a temp dir, so relative -I/-L
           # would resolve nowhere (srt/srt.h: No such file or directory).
@@ -317,8 +317,8 @@ jobs:
             -o bin/ctrlirl-coder-linux-arm64 ./cmd/ctrlirl-coder
           libfile=$(sed -n 's/.*"lib_file": "\([^"]*\)".*/\1/p' "$BUNDLE/build.json"); cp "$BUNDLE/$libfile" bin/arm64-libsrt.so.1.5
           cp "$BUNDLE/build.json" bin/arm64-build.json
-      - if: steps.skip-check.outputs.do == 'no'
       - name: Smoke test under qemu-user (boot, CERALIVE guard, contract)
+        if: steps.skip-check.outputs.do == 'no'
         run: |
           if ! command -v qemu-aarch64-static >/dev/null 2>&1; then
             echo "qemu-user-static not available; skipping dry-run smoke"
@@ -335,8 +335,8 @@ jobs:
             --pipeline pipeline/example-full.pipeline \
             --scene scene.example.json \
             --dry-run
-      - if: steps.skip-check.outputs.do == 'no'
       - name: Build arm64 .deb
+        if: steps.skip-check.outputs.do == 'no'
         run: bash scripts/build-deb.sh --arch arm64 --version "$DEB_VERSION"
       # The main component is refreshed by the amd64 job (it downloads both
       # per-arch release .debs and uploads the combined repo artifact).
