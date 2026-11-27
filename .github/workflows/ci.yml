@@ -556,6 +556,19 @@ jobs:
           }
           build main debs/main
           [ -s /tmp/comps ] || { echo "no components to publish"; exit 1; }
+          # Plain Release with NO hash block. apt 3.x (Ubuntu 26.04 /
+          # Pop!_OS clients) SILENTLY skips the Packages index fetch for an
+          # UNAUTHENTICATED Release that carries a hash table -> apt gets the
+          # Release but never the index -> "no installation candidate".
+          # Verified by A/B in a file: repo on apt 3.2.1: hash table present
+          # (hand-rolled OR apt-ftparchive, self-entry valid or absent) ->
+          # index skipped every time; no hash table -> index fetched every
+          # time. Matches the live repo: pre-hash-block Release installed
+          # fine, hash-block Release never did.
+          # "W: No Hash entry in Release file" is a cosmetic warning; the
+          # source line uses [trusted=yes]. Signing the Release (InRelease +
+          # Release.gpg + pubkey) is the future upgrade path to keep the
+          # hash tables.
           cat > "$DIST/Release" <<RELEASE
           Origin: CtrlIRL
           Label: ctrlirl-coder
@@ -566,17 +579,6 @@ jobs:
           Description: CtrlIRL-Coder live SRT encoder (releases)
           RELEASE
           echo "Date: $(date -u '+%a, %d %b %Y %H:%M:%S UTC')" >> "$DIST/Release"
-          # Hash entries: apt verifies each index file against these, so the
-          # Release file must list every Packages.gz (filename relative to the
-          # dist dir). Without a SHA256: block apt warns "No Hash entry in
-          # Release file" and cannot trust the downloaded indexes.
-          {
-            echo "SHA256:"
-            ( cd "$DIST" && find . -name 'Packages.gz' -type f -print0 \
-                | while IFS= read -r -d '' f; do
-                    printf ' %s %s %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$(stat -c %s "$f")" "${f#./}"
-                  done )
-          } >> "$DIST/Release"
           ls -lR site
       - if: steps.resolve.outputs.skip == 'false'
         name: Write index.html (.deb list)

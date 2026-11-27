@@ -893,12 +893,27 @@ Still open:
   path) writes nowhere — redirect to `> "$sub/Packages"` (basename, relative
   to `$COMP`). Verified: `apt-get update` + `apt-cache policy` resolve the
   package from a `file:` repo of this exact layout.
-- **2026-11-27 (apt Release file needs a SHA256 hash block):** apt verifies each
-  index file against the `Release` file's hash entries; with no `SHA256:` block
-  `apt-get update` warns `W: No Hash entry in Release file` and can't trust the
-  downloaded indexes. The `package-repo` build step now appends a `SHA256:` block
-  over every `Packages.gz` (filename relative to the `dists/ctrlirl` dir) after
-  writing the `Release`. Verified locally: the warning disappears with the block.
+- **2026-11-27 (apt 3.x skips the Packages index for an unsigned Release that
+  carries a hash block):** the earlier bullet ("apt Release file needs a SHA256
+  hash block") was wrong in the field — adding the `SHA256:` block made apt 3.x
+  (Ubuntu 26.04 / Pop!_OS clients, apt 3.2.1) SILENTLY skip the `Packages`
+  index fetch: `apt-get update` fetched the `Release`, never the index, and
+  `apt-cache policy` showed no candidate despite every file being present and
+  hash-valid on the server. A/B verified in a local `file:` repo on apt 3.2.1:
+  ANY hash table present in an UNAUTHENTICATED `Release` (hand-rolled
+  `SHA256:`, or `apt-ftparchive release` output, self-entry valid, absent, or
+  stale) → index fetch skipped, every time; no hash table → index fetched,
+  every time, `Candidate:` appears. `apt-ftparchive release` is also a dead end
+  on its own: it always emits hash tables, and its self-`Release` hash line
+  can never match the final file (`> Release` truncates the target before the
+  digest is computed). So the `package-repo` build step now writes a PLAIN
+  hash-less `Release` (Origin/Label/Suite/Codename/Architectures/Components/
+  Description/Date), which is the format that reliably installed before the
+  block was added. The resulting `W: No Hash entry in Release file` line is
+  cosmetic-only because the source line uses `[trusted=yes]`. The proper
+  upgrade path is signing: generate `InRelease` + `Release.gpg` with an OpenPGP
+  key, ship the public key, and switch the source line to
+  `deb [signed-by=…]` — then the hash tables can be kept (and are expected).
 - **2026-11-27 (Pages deploy: duplicate `github-pages` artifact on job-rerun):**
   `actions/deploy-pages` resolves the site by an artifact **name** in the current
   run. Re-running the `Deploy to GitHub Pages` job in isolation
