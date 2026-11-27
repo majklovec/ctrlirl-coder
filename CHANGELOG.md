@@ -1,3 +1,10 @@
+## [1.2.9](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.8...v1.2.9) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** canonical apt layout, main-only, fix scanpkg/redirect bugs ([8d141b7](https://github.com/majklovec/ctrlirl-coder/commit/8d141b76932383cb2bd247a7eaee6f87b8f429e8))
+
 ## [1.2.8](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.7...v1.2.8) (2026-11-27)
 
 
