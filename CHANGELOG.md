@@ -1,3 +1,10 @@
+## [1.2.1](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.0...v1.2.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** Pages repo — one deploy carries main+main-ci+binaries, only successful releases ([173a3f3](https://github.com/majklovec/ctrlirl-coder/commit/173a3f3f189e23c2b508f96a2ee3d0088e8617b4))
+
 # [1.2.0](https://github.com/majklovec/ctrlirl-coder/compare/v1.1.2...v1.2.0) (2026-11-27)
 
 
