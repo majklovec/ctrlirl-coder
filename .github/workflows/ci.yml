@@ -153,8 +153,12 @@ jobs:
       - name: Install GStreamer dev + plugins + CERALIVE build deps
         if: steps.skip-check.outputs.do == 'no'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          for i in 1 2 3; do
+            sudo apt-get update && break
+            sleep 30
+          done || { echo "apt-get update failed after 3 attempts"; exit 1; }
+          for i in 1 2 3; do
+            sudo apt-get install -y --no-install-recommends \
             gcc g++ cmake pkg-config git dpkg-dev \
             libglib2.0-dev libgnutls28-dev \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
@@ -162,6 +166,10 @@ jobs:
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad \
             gstreamer1.0-libav gstreamer1.0-x
+          && break
+            sleep 30
+          done || { echo "apt-get install failed after 3 attempts"; exit 1; }
+
       - name: Build binary (CERALIVE bundle + embedded identity)
         if: steps.skip-check.outputs.do == 'no'
         run: make dist-amd64
@@ -622,8 +630,12 @@ jobs:
 
       - name: Install GStreamer dev + plugins + CERALIVE build deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          for i in 1 2 3; do
+            sudo apt-get update && break
+            sleep 30
+          done || { echo "apt-get update failed after 3 attempts"; exit 1; }
+          for i in 1 2 3; do
+            sudo apt-get install -y --no-install-recommends \
             gcc g++ cmake pkg-config git dpkg-dev \
             libglib2.0-dev libgnutls28-dev \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
@@ -631,6 +643,9 @@ jobs:
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad \
             gstreamer1.0-libav gstreamer1.0-x
+          && break
+            sleep 30
+          done || { echo "apt-get install failed after 3 attempts"; exit 1; }
 
       - name: Build amd64 binary (CERALIVE bundle + embedded identity)
         run: make dist-amd64
