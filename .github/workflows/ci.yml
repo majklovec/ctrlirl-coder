@@ -45,6 +45,22 @@ jobs:
             @semantic-release/git \
             @semantic-release/github
 
+      # Sync to origin/main before running semrel. The checkout is pinned to
+      # this run's head SHA; if a faster run already cut a tag + chore commit,
+      # the pinned HEAD is behind it and semrel would recompute the same
+      # version and fail to push a tag that already exists. Fast-forwarding
+      # to origin/main (and refreshing tags) makes the analysis current.
+      - name: Sync branch and tags to origin
+        run: |
+          set -euo pipefail
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --force --tags origin
+          git fetch origin main
+          # Only fast-forward; never rewrite a non-ff branch.
+          git merge --ff-only origin/main || true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Semantic versioning (semantic-release)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

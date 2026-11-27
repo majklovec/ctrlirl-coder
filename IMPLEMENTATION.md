@@ -853,6 +853,15 @@ Still open:
   so the smoke step no-ops when qemu is absent. **The Pages repo part of
   this was later removed** ("no need of github pages") — see the entry
   below.
+- **2026-11-27 (semantic-release tag races):** fast-follow pushes left
+  overlapping runs whose semantic-release instances each checked out a
+  pinned head SHA, so neither saw the other's freshly-cut tag — both
+  computed the same next version and the second `git push --tags` was
+  rejected (already exists), failing the run and orphaning a tag with no
+  release. The version job now syncs branch + tags to origin
+  (`git merge --ff-only origin/main`) before running semrel, so an
+  already-cut tag is the analysis baseline. The tagless chore/tag pair
+  from the race was deleted.
 - **2026-11-27 (main component: Release-job proof, no step outputs):**
   the latest-release scan read the version job's `Detect release tag`
   step `outputs.new_tag` via the REST API, which returns `outputs: null`
