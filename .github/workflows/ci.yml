@@ -209,56 +209,33 @@ jobs:
       - name: Build amd64 .deb
         if: steps.skip-check.outputs.do == 'no'
         run: bash scripts/build-deb.sh --arch amd64 --version "$DEB_VERSION"
-      - name: Find latest successful release (main component)
+      - name: Fetch latest release .debs (main component)
         if: steps.skip-check.outputs.do == 'no'
-        id: prev-release
-        uses: actions/github-script@v9
-        with:
-          script: |
-            const pick = (r, keys) => {
-              let v = r;
-              for (const k of keys) { if (v && !Array.isArray(v)) v = v[k]; }
-              return Array.isArray(v) ? v : [];
-            };
-            // The `main` component carries the latest *published* release's
-            // debs: the Release job must have succeeded (whole-run success is
-            // not required — a dist-job flake must not hold main back).
-            const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
-              owner: context.repo.owner, repo: context.repo.repo,
-              workflow_id: 'ci.yml', branch: 'main',
-              status: 'completed', per_page: 100,
-            });
-            for (const run of runs) {
-              const jobResp = await github.rest.actions.listJobsForWorkflowRun({
-                owner: context.repo.owner, repo: context.repo.repo,
-                run_id: run.id, per_page: 100,
-              });
-              const jobs = pick(jobResp, ['data', 'jobs']);
-              // The Release job only runs (and attaches assets) when the
-              // version job cut a tag, so its success is the release proof.
-              // (Step outputs are not exposed by the REST API, so the tag
-              // cannot be read here — it is not needed for the download.)
-              const releaseJob = jobs.find(j => j.name === 'Release');
-              if (releaseJob?.conclusion !== 'success') continue;
-              core.setOutput('run_id', String(run.id));
-              core.info(`Latest release run: ${run.id}`);
-              return;
-            }
-            core.info('No successful Release job found yet — main component will be empty.');
-      - if: steps.prev-release.outputs.run_id != ''
-        name: Download latest release .debs (main component)
-        uses: actions/download-artifact@v7
-        with:
-          run-id: ${{ steps.prev-release.outputs.run_id }}
-          name: ctrlirl-coder-rel-amd64
-          path: repo/main
-      - if: steps.prev-release.outputs.run_id != ''
-        name: Download latest release .debs arm64 (main component)
-        uses: actions/download-artifact@v7
-        with:
-          run-id: ${{ steps.prev-release.outputs.run_id }}
-          name: ctrlirl-coder-rel-arm64
-          path: repo/main
+        run: |
+          set -uo pipefail
+          mkdir -p repo/main
+          # The `main` component carries the latest *published* GitHub
+          # Release's debs. They live on the release (permanent), not in a
+          # predecessor run's artifacts (which can 404 across runs), so this
+          # never races. A dist-job flake in some run must not hold `main`
+          # back: a failing fetch warns, it does not fail the run.
+          token="${GITHUB_TOKEN}"
+          json="$(curl -sf -H "Authorization: Bearer ${token}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest")" \
+            || { echo "::warning::No published release — main component will be empty."; exit 0; }
+          echo "$json" | python3 -c 'import sys,json
+          d=json.load(sys.stdin)
+          for a in d["assets"]:
+              if a["name"].endswith(".deb"):
+                  print(a["name"], a["browser_download_url"])' > /tmp/debs.txt
+          while read -r name url; do
+            [ -z "${name:-}" ] && continue
+            echo "Fetching ${name} -> repo/main/"
+            curl -sf -L -H "Authorization: Bearer ${token}" -o "repo/main/${name}" "$url" \
+              || echo "::warning::Failed to fetch ${name}; leaving main at prior state."
+          done < /tmp/debs.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # The repo artifact carries main-ci (this run's debs, at the root)
       # and main (latest successful release debs, under repo/) together,
       # so a single Page deploy always has both components.

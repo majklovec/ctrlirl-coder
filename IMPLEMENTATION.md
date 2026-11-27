@@ -862,6 +862,15 @@ Still open:
   (`git merge --ff-only origin/main`) before running semrel, so an
   already-cut tag is the analysis baseline. The tagless chore/tag pair
   from the race was deleted.
+- **2026-11-27 (main component: read published release assets, not run
+  artifacts):** the dist job used to re-download the `main` component from a
+  *predecessor run's* workflow artifacts (REST run-scan + `download-artifact`
+  with `run-id`). That cross-run fetch intermittently 404'd even when the
+  artifact existed, failing the whole dist job. `main` now pulls the latest
+  **published GitHub Release** debs from `/releases/latest` assets
+  (permanent, single source, no cross-run artifact dependency); a failed
+  fetch warns instead of failing the run so one flaky release never holds
+  `main` back.
 - **2026-11-27 (main component: Release-job proof, no step outputs):**
   the latest-release scan read the version job's `Detect release tag`
   step `outputs.new_tag` via the REST API, which returns `outputs: null`
