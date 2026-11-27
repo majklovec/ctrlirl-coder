@@ -853,6 +853,22 @@ Still open:
   so the smoke step no-ops when qemu is absent. **The Pages repo part of
   this was later removed** ("no need of github pages") — see the entry
   below.
+- **2026-11-27 (action version bumps + Pages apt repo revived):**
+  `actions/checkout` v4→v7, `actions/setup-go` v5→v7 (Node 20 deprecation
+  warnings on runners), artifact actions v7. The Pages apt repo came back
+  (user re-requested it) as a single `package-repo` job in `ci.yml` — one
+  Pages deploy must carry the whole site, so both components go out
+  together:
+    - **`main`** — release debs (tag version `1.x-y`), from the latest
+      successful Release run that cut a tag (job outputs queried via
+      `github.rest.actions.listJobsForWorkflowRun`).
+    - **`main-ci`** — per-push CI debs (`0.9.<run-number>-1`) from the
+      current green CI push.
+  Triggers: green CI pushes to main **and** successful Release workflow runs
+  (`workflow_run` in the CI workflow). Dist jobs build the debs again and
+  upload a `ctrlirl-coder-debs` artifact; the job consumes them. Pages
+  re-enabled via API (`build_type=workflow`). Both components monotonic →
+  `apt upgrade` tracks newest of each.
 - **2026-11-27 (semantic-release versioning + changelog + GitHub
   Release; Pages apt repo removed):** `version` → `dist-{amd64,arm64}` →
   `release` pipeline in `.github/workflows/release.yml`, modeled on the

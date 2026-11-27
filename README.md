@@ -149,11 +149,33 @@ make deb-arm64
 
 (Without the toolchain it falls back to a docker buildx image, emulated.)
 
-### Installing from a release .deb
+### Installing from the deb package repo (GitHub Pages)
 
-Every semantic release ships per-arch `.deb` builds as
-[GitHub Releases](https://github.com/majklovec/ctrlirl-coder/releases) assets
-(`ctrlirl-coder_<version>_<arch>.deb`):
+The CI `package-repo` job publishes `.deb` builds as a static apt repository
+on GitHub Pages with two components:
+
+| Component | Content | Versioning |
+|---|---|---|
+| `main` | release debs | release tags (e.g. `1.0.3-1`) |
+| `main-ci` | every green CI build on `main` | run number (`0.9.N-1`) |
+
+The repo is unsigned — add it with `[trusted=yes]`:
+
+```sh
+echo "deb [trusted=yes] https://majklovec.github.io/ctrlirl-coder/deb/dists main main-ci" \
+  | sudo tee /etc/apt/sources.list.d/ctrlirl-coder.list
+sudo apt-get update
+sudo apt-get install ctrlirl-coder
+```
+
+`sudo apt-get upgrade ctrlirl-coder` follows the newest build of each
+component.
+
+### Installing a release .deb directly
+
+Every semantic release also ships per-arch `.deb` + binary tarballs as
+[GitHub Releases](https://github.com/majklovec/ctrlirl-coder/releases)
+assets:
 
 ```sh
 wget -qO ctrlirl-coder.deb \
