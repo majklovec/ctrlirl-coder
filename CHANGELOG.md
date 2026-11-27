@@ -1,3 +1,10 @@
+## [1.3.2](https://github.com/majklovec/ctrlirl-coder/compare/v1.3.1...v1.3.2) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** use relative key link in deb index ([eb9a08d](https://github.com/majklovec/ctrlirl-coder/commit/eb9a08d19cfef31b0655a696f952f8abfe590767))
+
 ## [1.3.1](https://github.com/majklovec/ctrlirl-coder/compare/v1.3.0...v1.3.1) (2026-11-27)
 
 
