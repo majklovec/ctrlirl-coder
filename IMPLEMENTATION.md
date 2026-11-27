@@ -893,6 +893,12 @@ Still open:
   path) writes nowhere — redirect to `> "$sub/Packages"` (basename, relative
   to `$COMP`). Verified: `apt-get update` + `apt-cache policy` resolve the
   package from a `file:` repo of this exact layout.
+- **2026-11-27 (apt Release file needs a SHA256 hash block):** apt verifies each
+  index file against the `Release` file's hash entries; with no `SHA256:` block
+  `apt-get update` warns `W: No Hash entry in Release file` and can't trust the
+  downloaded indexes. The `package-repo` build step now appends a `SHA256:` block
+  over every `Packages.gz` (filename relative to the `dists/ctrlirl` dir) after
+  writing the `Release`. Verified locally: the warning disappears with the block.
 - **2026-11-27 (main component: Release-job proof, no step outputs):**
   the latest-release scan read the version job's `Detect release tag`
   step `outputs.new_tag` via the REST API, which returns `outputs: null`

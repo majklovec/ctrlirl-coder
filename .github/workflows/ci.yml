@@ -566,6 +566,17 @@ jobs:
           Description: CtrlIRL-Coder live SRT encoder (releases)
           RELEASE
           echo "Date: $(date -u '+%a, %d %b %Y %H:%M:%S UTC')" >> "$DIST/Release"
+          # Hash entries: apt verifies each index file against these, so the
+          # Release file must list every Packages.gz (filename relative to the
+          # dist dir). Without a SHA256: block apt warns "No Hash entry in
+          # Release file" and cannot trust the downloaded indexes.
+          {
+            echo "SHA256:"
+            ( cd "$DIST" && find . -name 'Packages.gz' -type f -print0 \
+                | while IFS= read -r -d '' f; do
+                    printf ' %s %s %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$(stat -c %s "$f")" "${f#./}"
+                  done )
+          } >> "$DIST/Release"
           ls -lR site
       - if: steps.resolve.outputs.skip == 'false'
         name: Write index.html (.deb list)
