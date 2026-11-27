@@ -1,3 +1,10 @@
+# [1.1.0](https://github.com/majklovec/ctrlirl-coder/compare/v1.0.3...v1.1.0) (2026-11-27)
+
+
+### Features
+
+* **ci:** action bumps (checkout/setup-go v7), Pages apt repo with main+main-ci components ([cc80f48](https://github.com/majklovec/ctrlirl-coder/commit/cc80f4879b265d0b8080b353d51762362af044d2))
+
 ## [1.0.3](https://github.com/majklovec/ctrlirl-coder/compare/v1.0.2...v1.0.3) (2026-11-27)
 
 
