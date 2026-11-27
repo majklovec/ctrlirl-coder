@@ -125,11 +125,11 @@ jobs:
             // If it already finished successfully, the full GStreamer test
             // suite ran there — skip the duplicate CI build. Otherwise
             // (no bump, release in flight, or release failed) build here.
-            const runs = await github.rest.actions.listWorkflowRuns({
+            const runs = (await github.rest.actions.listWorkflowRuns({
               owner: context.repo.owner, repo: context.repo.repo,
               workflow_id: 'ci.yml', event: 'push', branch: 'main',
               status: 'completed', per_page: 100,
-            });
+            })).data;
             for (const run of runs) {
               if (run.head_sha !== context.payload.sha) continue;
               const jobs = (await github.rest.actions.listJobsForWorkflowRun({
@@ -165,8 +165,7 @@ jobs:
             gstreamer1.0-tools \
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad \
-            gstreamer1.0-libav gstreamer1.0-x
-          && break
+            gstreamer1.0-libav gstreamer1.0-x && break
             sleep 30
           done || { echo "apt-get install failed after 3 attempts"; exit 1; }
 
@@ -264,11 +263,11 @@ jobs:
             // If it already finished successfully, the full GStreamer test
             // suite ran there — skip the duplicate CI build. Otherwise
             // (no bump, release in flight, or release failed) build here.
-            const runs = await github.rest.actions.listWorkflowRuns({
+            const runs = (await github.rest.actions.listWorkflowRuns({
               owner: context.repo.owner, repo: context.repo.repo,
               workflow_id: 'ci.yml', event: 'push', branch: 'main',
               status: 'completed', per_page: 100,
-            });
+            })).data;
             for (const run of runs) {
               if (run.head_sha !== context.payload.sha) continue;
               const jobs = (await github.rest.actions.listJobsForWorkflowRun({
@@ -642,8 +641,7 @@ jobs:
             gstreamer1.0-tools \
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad \
-            gstreamer1.0-libav gstreamer1.0-x
-          && break
+            gstreamer1.0-libav gstreamer1.0-x && break
             sleep 30
           done || { echo "apt-get install failed after 3 attempts"; exit 1; }
 
