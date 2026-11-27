@@ -331,6 +331,46 @@ jobs:
           [ -d site/deb/dists/main ] || [ -d site/deb/dists/main-ci ]
           ls -lR site
       - if: steps.resolve.outputs.skip == 'false'
+        name: Write index.html (.deb list)
+        run: |
+          set -euo pipefail
+          {
+            echo '<!DOCTYPE html>'
+            echo '<html lang="en"><head><meta charset="utf-8">'
+            echo '<title>CtrlIRL-Coder — deb packages</title>'
+            echo '<style>'
+            echo 'body{font-family:system-ui,sans-serif;margin:2rem;max-width:64rem}'
+            echo 'table{border-collapse:collapse;width:100%}'
+            echo 'th,td{border:1px solid #ccc;padding:.4rem .7rem;text-align:left}'
+            echo 'th{background:#f2f2f2}'
+            echo 'pre{background:#f6f6f6;padding:.8rem;overflow-x:auto}'
+            echo 'a{color:#0366d6}'
+            echo '</style></head><body>'
+            echo '<h1>CtrlIRL-Coder — deb packages</h1>'
+            echo '<p>Static apt-style repository (unsigned — <code>[trusted=yes]</code>), published by the CI <code>package-repo</code> job.</p>'
+            echo '<h2>Package components</h2>'
+            echo '<table><tr><th>Component</th><th>Content</th><th>Versioning</th></tr>'
+            echo '<tr><td>main</td><td>release debs</td><td>release tags (e.g. 1.0.3-1)</td></tr>'
+            echo '<tr><td>main-ci</td><td>every green CI build on main</td><td>run number (0.9.N-1)</td></tr></table>'
+            echo '<h2>Add the repository</h2>'
+            echo '<pre>deb [trusted=yes] https://majklovec.github.io/ctrlirl-coder/deb/dists main main-ci</pre>'
+            echo '<h2>Debs</h2>'
+            echo '<table><tr><th>Version</th><th>Component</th><th>Architecture</th><th>Size</th><th>File</th></tr>'
+            for comp in main main-ci; do
+              for f in "site/deb/dists/$comp"/binary-*/*.deb; do
+                [ -e "$f" ] || continue
+                arch=$(basename "$(dirname "$f")" | sed 's/^binary-//')
+                ver=$(dpkg-deb -f "$f" Version 2>/dev/null || basename "$f" | sed -E 's/^ctrlirl-coder_(.*)_[a-z0-9]+\.deb$/\1/')
+                size=$(( $(stat -c %s "$f") / 1024 ))
+                rel=${f#site/}
+                echo "<tr><td>$ver</td><td>$comp</td><td>$arch</td><td>${size} KiB</td><td><a href=\"$rel\">$rel</a></td></tr>"
+              done
+            done
+            echo '</table>'
+            echo '</body></html>'
+          } > site/index.html
+          head -30 site/index.html
+      - if: steps.resolve.outputs.skip == 'false'
         name: Write site README
         run: |
           cat > site/README.md <<'README'

@@ -853,6 +853,13 @@ Still open:
   so the smoke step no-ops when qemu is absent. **The Pages repo part of
   this was later removed** ("no need of github pages") — see the entry
   below.
+- **2026-11-27 (Pages index.html with .deb list):** the
+  `package-repo` job now writes `site/index.html` (static, styled) listing
+  every published `.deb` (version / component / arch / size / download
+  link) alongside the repo-add instructions and the component table.
+  Version comes from `dpkg-deb -f` with a basename fallback; arch from the
+  `binary-<arch>` directory. Generated in the same step set as the apt
+  metadata, so it is always in sync with the deploy.
 - **2026-11-27 (action version bumps + Pages apt repo revived):**
   `actions/checkout` v4→v7, `actions/setup-go` v5→v7 (Node 20 deprecation
   warnings on runners), artifact actions v7. The Pages apt repo came back
