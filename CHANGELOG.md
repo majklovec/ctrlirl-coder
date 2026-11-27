@@ -1,3 +1,10 @@
+## [1.2.11](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.10...v1.2.11) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** ship hash-less apt Release — apt 3.x skips the Packages index when ([7a160a0](https://github.com/majklovec/ctrlirl-coder/commit/7a160a078f53a05a318026d5859135f9d3cb8304))
+
 ## [1.2.10](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.9...v1.2.10) (2026-11-27)
 
 
