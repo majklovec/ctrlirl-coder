@@ -982,7 +982,11 @@ Still open:
   — and every further rerun makes it worse. The deploy also occasionally hits a
   transient `Deployment failed, try again later` on the Pages API side. Both are
   fixed by a **fresh run** (a new commit → new run id → a single `github-pages`
-  artifact); do not job-rerun the Pages step.
+  artifact); do not job-rerun the Pages step. The deploy step also now carries
+  an **in-job retry** (`continue-on-error` → 60 s wait → second
+  `deploy-pages` invocation with **no re-upload**, so no duplicate-artifact
+  trap) covering the transient `No artifacts named "github-pages" were
+  found` / `Fetching artifact metadata failed` Actions-API hiccups.
 - **2026-11-27 (main component: Release-job proof, no step outputs):**
   the latest-release scan read the version job's `Detect release tag`
   step `outputs.new_tag` via the REST API, which returns `outputs: null`

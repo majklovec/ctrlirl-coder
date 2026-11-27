@@ -660,6 +660,17 @@ jobs:
               name: Deploy to GitHub Pages
               id: deployment
               uses: actions/deploy-pages@v5
+              continue-on-error: true
+            # Transient artifact-metadata fetch failures ("No artifacts named
+            # github-pages were found") are GitHub-side hiccups: the artifact is
+            # uploaded. Retrying the deploy (NO re-upload - no duplicate artifact)
+            # recovers without a full re-run.
+            - name: Wait before deploy retry
+              if: steps.deployment.outcome == 'failure'
+              run: sleep 60
+            - name: Deploy to GitHub Pages (retry)
+              if: steps.deployment.outcome == 'failure'
+              uses: actions/deploy-pages@v5
 
     # Release only assembles artifacts produced and tested by the two build jobs.
     release:
