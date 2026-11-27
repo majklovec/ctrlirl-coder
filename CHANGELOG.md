@@ -1,3 +1,10 @@
+## [1.2.8](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.7...v1.2.8) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** pick latest release with .deb assets for main component ([7e0b3ae](https://github.com/majklovec/ctrlirl-coder/commit/7e0b3aed0f29c73d68a6590b0332840a00588234))
+
 ## [1.2.7](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.6...v1.2.7) (2026-11-27)
 
 
