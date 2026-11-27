@@ -1,3 +1,10 @@
+## [1.2.5](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.4...v1.2.5) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** key latest-release scan on Release job success ([0dfd3e9](https://github.com/majklovec/ctrlirl-coder/commit/0dfd3e90bdb70170fa4b5fc0e2032c6f0adc80eb))
+
 ## [1.2.4](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.3...v1.2.4) (2026-11-27)
 
 
