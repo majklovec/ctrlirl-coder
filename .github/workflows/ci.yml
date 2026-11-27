@@ -578,7 +578,7 @@ jobs:
                     echo '<table><tr><th>Component</th><th>Content</th><th>Versioning</th></tr>'
                     echo '<tr><td>main</td><td>release debs</td><td>release tags (e.g. 1.0.3-1)</td></tr></table>'
                     echo '<h2>Add the repository</h2>'
-                    echo '<pre>sudo mkdir -p /etc/apt/keyrings
+                    echo '<pre>  sudo mkdir -p /etc/apt/keyrings
                     curl -fsSL https://majklovec.github.io/ctrlirl-coder/deb/ctrlirl.asc -o /etc/apt/keyrings/ctrlirl.asc
                     echo "deb [signed-by=/etc/apt/keyrings/ctrlirl.asc] https://majklovec.github.io/ctrlirl-coder/deb ctrlirl main" | sudo tee /etc/apt/sources.list.d/ctrlirl-coder.list
                     sudo apt-get update
