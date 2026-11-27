@@ -868,6 +868,15 @@ Still open:
   HEAD finished with a successful Release job, the CI dist build is
   skipped (the release already built+tested). Concurrency
   `cancel-in-progress` per ref keeps one in-flight run per branch.
+- **2026-11-27 (post-consolidation CI fixes):** two follow-up bugs from
+  the first integrated runs — (1) the apt retry loops were written with
+  `&& break` on its own line, a bash syntax error (`syntax error near
+  unexpected token '&&'`) that killed every install step; the `break` is
+  now appended to the `apt-get install` line. (2) `github-script`'s
+  typed client returns `{data: [...]}` from `listWorkflowRuns`, so the
+  dist jobs' `skip-check` crashed with `TypeError: runs is not
+  iterable`; the calls now destructure `.data` (the `package-repo` job
+  already used `paginate`, which returns the bare array).
 - **2026-11-27 (stale-push release cancellation):** rapid consecutive
   pushes cancel the earlier Release run's dist jobs mid-build
   (GitHub cancels superseded runs), so a tag can be cut with an empty
