@@ -960,6 +960,30 @@ Still open:
   The signed `InRelease` carries `Insecure-Allowed: yes`, so the untrusted
   `*.github.io` host passes the apt 3.x signed-URI security check without a
   CA pin — the same `signed-by` line works everywhere.
+- **2026-11-27 (Release is hand-rolled; apt-ftparchive output is broken for
+  this layout; apt 3.x is strict):** with only `APT::FTPArchive::Release::
+  {Origin,Label,Suite,Codename,Description}` set, `apt-ftparchive release`
+  auto-detected **no `Architectures:`/`Components:` fields** for the
+  `<comp>/binary-<arch>` layout (and never lists the uncompressed `Packages`
+  target in the hash table). apt 3.x (Ubuntu 26.04 / Pop!_OS / Armbian)
+  matches index requests strictly against the Release → every `Packages`
+  index is skipped (`W: Skipping acquire of configured file
+  'main/binary-arm64/Packages' … does not seem to provide it` → `E: Unable
+  to locate package ctrlirl-coder`).
+  The `Build apt repo (main)` step now writes the Release itself: canonical
+  field set (`Origin/Label/Suite/Codename/Architectures/Components/
+  Description/Date`) + MD5/SHA1/SHA256 tables with exact
+  `main/binary-<arch>/Packages[.gz]` paths and no self-hash entry
+  (InRelease's signature authenticates the file). Three more apt 3.x
+  strictness traps found in the same test: (1) the `Date` field must be a
+  valid RFC 1123 date — `date -R` with a `+0100` offset is rejected
+  (`W: Invalid 'Date' entry`), so it is generated UTC (`date -u -R`);
+  (2) apt only fetches an index target whose **canonical uncompressed** form
+  is listed in the hash table — `.gz`-only listings fetch nothing, so the
+  plain `Packages` files ship too (`gzip -9kf`); (3) an invalid Release
+  silently skips all indexes with no error. Verified end-to-end on
+  apt 3.2.1 against a `file:` repo with the real 1.3.4 debs: both arch
+  indexes fetched, `Candidate: 1.3.4-1`.
 - **2026-11-27 (Pages "Release binaries (latest)" empty in CI-mode publishes):**
   the `package-repo` job populated `site/bin` only in `release` mode
   (tarball artifacts from the tag run); every push-to-main publish

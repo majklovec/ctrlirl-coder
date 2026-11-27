@@ -536,32 +536,54 @@ jobs:
                       # redirect to $rel/Packages (relative to $SITE after the cd), not
                       # $d/Packages (only valid from the original CWD).
                       ( cd "$SITE" && dpkg-scanpackages --multiversion "$rel" /dev/null > "$rel/Packages" 2>/dev/null )
-                      gzip -9f "$d/Packages"
+                      # -k: keep the uncompressed Packages; apt 3.x only fetches
+                      # index targets whose canonical (uncompressed) form is in the
+                      # Release hash table
+                      gzip -9kf "$d/Packages"
                     done
                     echo "$comp" >> /tmp/comps
                   }
                   build main debs/main
                   [ -s /tmp/comps ] || { echo "no components to publish"; exit 1; }
-                  # Signed Release: apt-ftparchive emits the canonical metadata + full
-                  # hash table, then we clear-sign (InRelease) and detached-sign
-                  # (Release.gpg) with the release key. Signing is REQUIRED here - an
-                  # UNAUTHENTICATED Release carrying a hash table makes apt 3.x
-                  # (Ubuntu 26.04 / Pop!_OS) SILENTLY skip the Packages index fetch
-                  # (no candidate). A signed Release is authenticated, so the hash
-                  # table is expected + verified and the index fetches normally.
-                  # Verified end-to-end in a file: repo on apt 3.2.1: signed Release
-                  # -> no "No Hash entry" / "Could not determine Signed-By" warnings,
-                  # index fetched, apt-get install succeeds.
-                  # Public key ships at site/deb/ctrlirl.asc; consumers use that file
-                  # in their source line ([signed-by=/etc/apt/…/ctrlirl.asc]).
-                  cat > /tmp/apt-release.conf <<CONF
-                  APT::FTPArchive::Release::Origin "CtrlIRL";
-                  APT::FTPArchive::Release::Label "ctrlirl-coder";
-                  APT::FTPArchive::Release::Suite "stable";
-                  APT::FTPArchive::Release::Codename "ctrlirl";
-                  APT::FTPArchive::Release::Description "CtrlIRL-Coder live SRT encoder (releases)";
-                  CONF
-                  apt-ftparchive -c /tmp/apt-release.conf release "$DIST" > "$DIST/Release"
+                  # Signed Release: hand-rolled, NOT apt-ftparchive. With only
+                  # {Origin,Label,Suite,Codename,Description} configured,
+                  # apt-ftparchive auto-detected no Architectures/Components
+                  # fields for this layout and never lists the uncompressed
+                  # Packages target; apt 3.x (Pop!_OS 26.04, Armbian) matches
+                  # index requests strictly against the Release, so it skips
+                  # every Packages index ("Unable to locate package"). The
+                  # Release below is the canonical field set + exact
+                  # <component>/binary-<arch>/Packages[.gz] hash entries, no
+                  # self-hash entry (InRelease's signature authenticates the
+                  # file).
+                  # Signing is REQUIRED: an UNAUTHENTICATED Release carrying a hash
+                  # table makes apt 3.x (Ubuntu 26.04 / Pop!_OS) SILENTLY skip the
+                  # index fetch. Public key ships at site/deb/ctrlirl.asc.
+                  archs=$(ls -d "$DIST"/*/binary-*/ 2>/dev/null | xargs -n1 basename | sed 's/^binary-//' | LC_ALL=C sort -u | tr '\n' ' ')
+                  {
+                    echo 'Origin: CtrlIRL'
+                    echo 'Label: ctrlirl-coder'
+                    echo 'Suite: stable'
+                    echo 'Codename: ctrlirl'
+                    echo "Architectures: ${archs% }"
+                    echo "Components: $(tr '\n' ' ' < /tmp/comps | sed 's/ $//')"
+                    echo 'Description: CtrlIRL-Coder live SRT encoder (releases)'
+                    echo "Date: $(LC_ALL=C date -u -R)"
+                    for h in MD5Sum SHA1 SHA256; do
+                      case $h in
+                        MD5Sum) hsum=md5sum ;; SHA1) hsum=sha1sum ;; SHA256) hsum=sha256sum ;;
+                      esac
+                      echo "$h:"
+                      # list BOTH Packages and Packages.gz: apt 3.x skips index
+                      # targets whose canonical (uncompressed) form is not in the
+                      # hash table, so the plain file ships too
+                      ( cd "$SITE" && find dists/ctrlirl \( -name 'Packages' -o -name 'Packages.gz' \) | LC_ALL=C sort |
+                        while IFS= read -r f; do
+                          rel=${f#dists/ctrlirl/}
+                          printf ' %s %s %s\n' "$($hsum "$f" | cut -d' ' -f1)" "$(stat -c %s "$f")" "$rel"
+                        done )
+                    done
+                  } > "$DIST/Release"
                   gpg --batch --yes --pinentry-mode loopback --passphrase '' \
                     --clearsign --output "$DIST/InRelease" "$DIST/Release"
                   gpg --batch --yes --pinentry-mode loopback --passphrase '' \
