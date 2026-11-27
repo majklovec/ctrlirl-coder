@@ -1,3 +1,10 @@
+## [1.3.1](https://github.com/majklovec/ctrlirl-coder/compare/v1.3.0...v1.3.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* **ci:** install apt-utils for apt-ftparchive ([d34ce39](https://github.com/majklovec/ctrlirl-coder/commit/d34ce3981fd6f54b87eac9d66b65acf73ec93f98))
+
 # [1.3.0](https://github.com/majklovec/ctrlirl-coder/compare/v1.2.13...v1.3.0) (2026-11-27)
 
 
