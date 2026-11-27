@@ -933,7 +933,11 @@ Still open:
   `apt-ftparchive -c /tmp/apt-release.conf release` (metadata from
   `APT::FTPArchive::Release::*`; `Architectures`/`Components` auto-detected
   from the `Packages` files) and signs it: `gpg --clearsign → InRelease` +
-  `gpg --detach-sign → Release.gpg`. Signing is the proper fix for the apt
+  `gpg --detach-sign → Release.gpg`. `apt-ftparchive` lives in the
+  **`apt-utils`** package (not in `apt` or `dpkg-dev` — the runner image
+  ships `apt` without it), so the `Install apt packaging tools` step
+  explicitly installs `apt-utils dpkg-dev gnupg`; without it the step dies
+  with `apt-ftparchive: command not found`. Signing is the proper fix for the apt
   3.x hash-skip gotcha above — an *authenticated* Release **with** its hash
   table is consumed normally; only *unsigned*-with-hash releases are
   skipped. The release key is `CtrlIRL-Coder Release <release@ctrlirl.local>`,
