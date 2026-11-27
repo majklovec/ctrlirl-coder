@@ -853,6 +853,12 @@ Still open:
   so the smoke step no-ops when qemu is absent. **The Pages repo part of
   this was later removed** ("no need of github pages") — see the entry
   below.
+- **2026-11-27 (TestAppsinkPull flake on 2-vCPU runners):** the
+  live-paced (`is-live=true` 30×30fps) pull test can yield 0 frames when
+  the test process is descheduled while the finite source runs out — the
+  drop=true appsink flushes buffers the puller never drained. The run body
+  is now retried up to 3 times with backoff before failing; non-flaky
+  failures (pipeline parse/play) still fail immediately.
 - **2026-11-27 (release assets + apt repo fixes):** four follow-up bugs
   from the first green release run: (1) **artifact name shadowing** — the
   dist jobs and the Release job both uploaded `ctrlirl-coder-amd64` /

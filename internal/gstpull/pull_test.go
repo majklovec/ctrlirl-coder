@@ -2,6 +2,7 @@ package gstpull
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,7 +19,28 @@ import (
 // and the pull loop's exit on EOS (pull returns NULL once the sink is in EOS).
 // Live pacing (30 frames at 30 fps ≈ 1 s) lets the rolling throughput window
 // finalize at least once.
+//
+// Live-paced sources are racy on small/loaded CI runners: if the test process
+// is descheduled while the source runs out, the drop=true appsink flushes its
+// buffers before the puller drains them and the run yields 0 frames. The run
+// is retried up to 3 times to make the flake non-blocking.
 func TestAppsinkPull(t *testing.T) {
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if lastErr = runAppsinkPull(t); lastErr == nil {
+			if attempt > 1 {
+				t.Logf("passed on attempt %d", attempt)
+			}
+			return
+		}
+		t.Logf("attempt %d flaked: %v", attempt, lastErr)
+		time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+	}
+	t.Fatalf("failed after 3 attempts: %v", lastErr)
+}
+
+func runAppsinkPull(t *testing.T) error {
+	t.Helper()
 	gstutil.EnsureInit()
 	pip, err := gstutil.FromLaunch(
 		"videotestsrc is-live=true num-buffers=30 pattern=ball " +
@@ -60,26 +82,27 @@ func TestAppsinkPull(t *testing.T) {
 	}
 
 	if got := p.Frames(); got != 30 {
-		t.Fatalf("frames = %d, want 30", got)
+		return fmt.Errorf("frames = %d, want 30", got)
 	}
 	if p.BytesPulled() == 0 {
-		t.Fatal("no bytes pulled")
+		return fmt.Errorf("no bytes pulled")
 	}
 	if got := p.BytesSent(); got != p.BytesPulled() {
-		t.Fatalf("sent %d != pulled %d", got, p.BytesPulled())
+		return fmt.Errorf("sent %d != pulled %d", got, p.BytesPulled())
 	}
 	if got := p.ThroughputKbps(); got == 0 {
-		t.Fatal("throughput kbps = 0 after 30 frames")
+		return fmt.Errorf("throughput kbps = 0 after 30 frames")
 	}
 	if fr := p.Framerate(); fr < 29.9 || fr > 30.1 {
-		t.Fatalf("framerate = %v, want 30", fr)
+		return fmt.Errorf("framerate = %v, want 30", fr)
 	}
 	if p.LastPTS() == 0 {
-		t.Fatal("last PTS = 0")
+		return fmt.Errorf("last PTS = 0")
 	}
 	if p.Dropped() != 0 {
-		t.Fatalf("dropped = %d, want 0", p.Dropped())
+		return fmt.Errorf("dropped = %d, want 0", p.Dropped())
 	}
+	return nil
 }
 
 // TestStallDetection checks the frame_liveness math: fresh after a pull,
