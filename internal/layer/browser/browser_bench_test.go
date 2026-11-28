@@ -21,10 +21,8 @@ import (
 // benchFrame is a 300 KB stand-in for a 1280x720 browser screenshot frame.
 var benchFrame = make([]byte, 300*1024)
 
-// BenchmarkCDPFrameDecode benchmarks the frame payload path of a
-// Page.captureScreenshot response: websocket-frame bytes → JSON envelope
-// (map decode — a json.RawMessage result field benchmarks ~2x slower) →
-// base64 decode of the "data" field.
+// BenchmarkCDPFrameDecode benchmarks decoding a Page.captureScreenshot
+// response (the polling fallback's frame path): JSON envelope → frame bytes.
 func BenchmarkCDPFrameDecode(b *testing.B) {
 	b.ReportAllocs()
 	b64 := base64.StdEncoding.EncodeToString(benchFrame)
@@ -33,19 +31,11 @@ func BenchmarkCDPFrameDecode(b *testing.B) {
 		b.Fatal(err)
 	}
 	for i := 0; i < b.N; i++ {
-		var r cdpResponse
-		if err := json.Unmarshal(env, &r); err != nil {
+		var m cdpMessage
+		if err := json.Unmarshal(env, &m); err != nil {
 			b.Fatal(err)
 		}
-		s, ok := r.Result["data"].(string)
-		if !ok {
-			b.Fatal("no data in result")
-		}
-		d, err := base64.StdEncoding.DecodeString(s)
-		if err != nil {
-			b.Fatal(err)
-		}
-		if len(d) != len(benchFrame) {
+		if len(m.Result.Data) != len(benchFrame) {
 			b.Fatal("frame size mismatch")
 		}
 	}
@@ -121,7 +111,7 @@ func benchSession(tb testing.TB, serve func(ctx context.Context, c *websocket.Co
 	return &cdpsession{
 		ws:     conn,
 		done:   make(chan struct{}),
-		calls:  make(map[int]chan *cdpResponse, 8),
+		calls:  make(map[int]chan *cdpMessage, 8),
 		loadCh: make(chan struct{}),
 	}
 }

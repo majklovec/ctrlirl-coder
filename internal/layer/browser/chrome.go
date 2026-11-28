@@ -17,6 +17,7 @@
 package browser
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -47,7 +48,9 @@ type cdpsession struct {
 
 	mu     sync.Mutex
 	nextID int
-	calls  map[int]chan *cdpResponse
+	calls  map[int]chan *cdpMessage
+
+	ackBuf []byte // frame-ack scratch; read-loop goroutine only
 
 	// screencast frame sink, installed by the feeder before startScreencast.
 	// Called from readLoop with the decoded PNG frame; the ack is sent by
@@ -63,13 +66,33 @@ type cdpsession struct {
 	loadCh   chan struct{}
 }
 
-// cdpResponse is a DevTools response envelope. Result stays a map: a
-// json.RawMessage result field makes the whole envelope decode ~2x slower
-// (benchmarked), and the capture path decodes its own "data" field from it.
-type cdpResponse struct {
-	ID     int            `json:"id"`
-	Result map[string]any `json:"result"`
-	Error  *cdpCError     `json:"error"`
+// cdpMessage is one DevTools message: a command response (ID set) or a page
+// event (Method set). It is decoded in ONE pass into typed fields: the frame
+// payloads are megabyte-scale base64 strings arriving up to 60 times a
+// second, and a []byte field lets encoding/json base64-decode them straight
+// out of the message — no map[string]any, no intermediate string, no second
+// parse to tell an event from a response.
+type cdpMessage struct {
+	ID     int        `json:"id"`
+	Method string     `json:"method"`
+	Params cdpParams  `json:"params"`
+	Result cdpResult  `json:"result"`
+	Error  *cdpCError `json:"error"`
+}
+
+// cdpParams holds the event parameters the session reads.
+type cdpParams struct {
+	Data      []byte `json:"data"`      // Page.screencastFrame: the PNG
+	SessionID int64  `json:"sessionId"` // Page.screencastFrame: echoed in the ack
+	FrameID   string `json:"frameId"`
+}
+
+// cdpResult holds the command results the session reads.
+type cdpResult struct {
+	Data   []byte `json:"data"` // Page.captureScreenshot: the PNG
+	Result struct {
+		Value any `json:"value"` // Runtime.evaluate (returnByValue)
+	} `json:"result"`
 }
 
 type cdpCError struct {
@@ -195,7 +218,7 @@ func newCDPSession(ctx context.Context, url, audioSink string, w, h int) (*cdpse
 		userDir: userDir,
 		port:    port,
 		done:    make(chan struct{}),
-		calls:   make(map[int]chan *cdpResponse, 8),
+		calls:   make(map[int]chan *cdpMessage, 8),
 		loadCh:  make(chan struct{}),
 	}
 
@@ -376,15 +399,10 @@ func (s *cdpsession) capture(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	b64, ok := res["data"].(string)
-	if !ok {
+	if len(res.Data) == 0 {
 		return nil, fmt.Errorf("layer: captureScreenshot returned no data")
 	}
-	frame, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil || len(frame) == 0 {
-		return nil, fmt.Errorf("layer: captureScreenshot returned no data")
-	}
-	return frame, nil
+	return res.Data, nil
 }
 
 // glRenderer reports the active WebGL rasterizer via a Runtime.evaluate probe
@@ -413,8 +431,7 @@ func (s *cdpsession) glRenderer(ctx context.Context) string {
 	if err != nil {
 		return "unknown: " + err.Error()
 	}
-	v, _ := res["result"].(map[string]any)
-	r, _ := v["value"].(string)
+	r, _ := res.Result.Value.(string)
 	if r == "" {
 		return "unknown"
 	}
@@ -422,35 +439,35 @@ func (s *cdpsession) glRenderer(ctx context.Context) string {
 }
 
 // call sends one CDP command and waits for its response.
-func (s *cdpsession) call(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
+func (s *cdpsession) call(ctx context.Context, method string, params map[string]any) (cdpResult, error) {
 	id, ch := s.nextCall()
 	defer s.dropCall(id)
 
 	payload, err := json.Marshal(map[string]any{"id": id, "method": method, "params": params})
 	if err != nil {
-		return nil, err
+		return cdpResult{}, err
 	}
 	if err := s.ws.Write(ctx, websocket.MessageText, payload); err != nil {
-		return nil, fmt.Errorf("layer: CDP %s: %w", method, err)
+		return cdpResult{}, fmt.Errorf("layer: CDP %s: %w", method, err)
 	}
 	select {
 	case r := <-ch:
 		if r.Error != nil {
-			return nil, fmt.Errorf("layer: CDP %s: %s", method, r.Error.Message)
+			return cdpResult{}, fmt.Errorf("layer: CDP %s: %s", method, r.Error.Message)
 		}
 		return r.Result, nil
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return cdpResult{}, ctx.Err()
 	case <-s.done:
-		return nil, fmt.Errorf("layer: chrome exited")
+		return cdpResult{}, fmt.Errorf("layer: chrome exited")
 	}
 }
 
-func (s *cdpsession) nextCall() (int, chan *cdpResponse) {
+func (s *cdpsession) nextCall() (int, chan *cdpMessage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nextID++
-	ch := make(chan *cdpResponse, 1)
+	ch := make(chan *cdpMessage, 1)
 	s.calls[s.nextID] = ch
 	return s.nextID, ch
 }
@@ -461,97 +478,154 @@ func (s *cdpsession) dropCall(id int) {
 	s.mu.Unlock()
 }
 
-// readLoop dispatches CDP responses to their waiters; page events are ignored.
+// readLoop reads DevTools messages until the socket closes, then fails every
+// pending call. One buffer is reused for all messages: dispatch consumes a
+// message completely (decoding copies what it keeps) before the next read.
 func (s *cdpsession) readLoop() {
+	var msg bytes.Buffer
 	for {
-		_, data, err := s.ws.Read(context.Background())
+		_, r, err := s.ws.Reader(context.Background())
+		if err == nil {
+			msg.Reset()
+			_, err = msg.ReadFrom(r)
+		}
 		if err != nil {
-			s.mu.Lock()
-			chans := s.calls
-			s.calls = make(map[int]chan *cdpResponse, 8)
-			s.mu.Unlock()
-			for _, ch := range chans {
-				select {
-				case ch <- &cdpResponse{Error: &cdpCError{Message: err.Error()}}:
-				default:
-				}
-			}
+			s.failPendingCalls(err)
 			return
 		}
-		s.dispatch(data)
+		s.dispatch(msg.Bytes())
 	}
 }
 
-// dispatch routes one CDP message: a response goes to its waiter, anything
-// else is a page event. Runs on the read-loop goroutine.
+// failPendingCalls answers every waiting call with err (the socket is gone).
+func (s *cdpsession) failPendingCalls(err error) {
+	s.mu.Lock()
+	pending := s.calls
+	s.calls = make(map[int]chan *cdpMessage, 8)
+	s.mu.Unlock()
+	for _, ch := range pending {
+		select {
+		case ch <- &cdpMessage{Error: &cdpCError{Message: err.Error()}}:
+		default:
+		}
+	}
+}
+
+// dispatch routes one DevTools message: a response goes to its waiter, a
+// page event to handleEvent. Runs on the read-loop goroutine and must not
+// keep a reference to data.
 func (s *cdpsession) dispatch(data []byte) {
-	var r cdpResponse
-	if json.Unmarshal(data, &r) != nil || r.ID == 0 {
-		s.streamEvent(data)
+	// Screencast frames are nearly all of the traffic and nearly all of
+	// its bytes; they take a shortcut around the JSON decoder.
+	if frame, sessionID, ok := screencastFrame(data); ok {
+		s.handleFrame(frame, sessionID)
+		return
+	}
+	var m cdpMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		if m.ID == 0 {
+			return // an event in a shape the session does not read
+		}
+		m.Error = &cdpCError{Message: "malformed response: " + err.Error()}
+	}
+	if m.ID == 0 {
+		s.handleEvent(&m)
 		return
 	}
 	s.mu.Lock()
-	if ch, ok := s.calls[r.ID]; ok {
-		ch <- &r
+	if ch, ok := s.calls[m.ID]; ok {
+		ch <- &m
 	}
 	s.mu.Unlock()
 }
 
-// streamEvent handles CDP page events (id==0, no pending call):
-// Page.screencastFrame is passed to the installed handler and acked; the
-// main frame's Page.loadEventFired closes loadCh; everything else is
-// ignored. Runs on the read-loop goroutine.
-func (s *cdpsession) streamEvent(raw []byte) {
-	var e struct {
-		Method string `json:"method"`
-		Params struct {
-			Data      string `json:"data"`
-			SessionID int64  `json:"sessionId"`
-			FrameID   string `json:"frameId"`
-		} `json:"params"`
+// screencastPrefix is how Chrome starts every Page.screencastFrame message:
+// method first, then params with the frame as its first member.
+const screencastPrefix = `{"method":"Page.screencastFrame","params":{"data":"`
+
+// screencastFrame decodes a Page.screencastFrame message without running the
+// JSON decoder over the frame. encoding/json validates and scans every byte
+// of a message before decoding it, which costs several times the base64
+// decode itself on a megabyte string.
+//
+// It recognises exactly the layout Chrome emits (screencastPrefix), takes the
+// base64 run up to its closing quote, and JSON-decodes only the small
+// remainder of params. Anything else — another member order, an escape
+// inside the string, invalid base64, a malformed tail — reports !ok and the
+// caller falls back to the generic decoder, so this is an optimisation only:
+// it never decides what a message means.
+func screencastFrame(msg []byte) (frame []byte, sessionID int64, ok bool) {
+	if !bytes.HasPrefix(msg, []byte(screencastPrefix)) {
+		return nil, 0, false
 	}
-	if json.Unmarshal(raw, &e) != nil {
-		return
+	b64 := msg[len(screencastPrefix):]
+	end := bytes.IndexByte(b64, '"')
+	if end < 0 {
+		return nil, 0, false
 	}
-	switch e.Method {
+	// tail is what follows the frame: `,"metadata":{…},"sessionId":7}}`.
+	// Without the message's final brace and behind a stand-in for the
+	// frame, it is the params object on its own.
+	b64, tail := b64[:end], b64[end+1:]
+	if len(tail) < 2 || tail[len(tail)-1] != '}' {
+		return nil, 0, false
+	}
+	var params struct {
+		SessionID int64 `json:"sessionId"`
+	}
+	rest := make([]byte, 0, len(tail)+len(`{"data":""`))
+	rest = append(append(rest, `{"data":""`...), tail[:len(tail)-1]...)
+	if json.Unmarshal(rest, &params) != nil {
+		return nil, 0, false
+	}
+	frame = make([]byte, base64.StdEncoding.DecodedLen(len(b64)))
+	n, err := base64.StdEncoding.Decode(frame, b64)
+	if err != nil {
+		return nil, 0, false
+	}
+	return frame[:n], params.SessionID, true
+}
+
+// handleEvent handles a page event: a screencast frame (generic decode
+// path), or the main frame's Page.loadEventFired, which closes loadCh.
+// Everything else is ignored.
+func (s *cdpsession) handleEvent(m *cdpMessage) {
+	switch m.Method {
 	case "Page.screencastFrame":
-		s.strMu.Lock()
-		fn := s.streamFn
-		s.strMu.Unlock()
-		if fn != nil {
-			frame, err := base64.StdEncoding.DecodeString(e.Params.Data)
-			if err != nil || len(frame) == 0 {
-				slog.Debug("layer: screencast frame decode failed", "err", err)
-			} else {
-				fn(frame)
-			}
-		}
-		// Ack so Chrome keeps streaming (it stalls delivery once unacked
-		// frames pile up). Fire-and-forget write: a blocking s.call here
-		// deadlocks — this runs on the read loop, which is the only
-		// goroutine that can read the ack's response.
-		s.ackScreencast(e.Params.SessionID)
+		s.handleFrame(m.Params.Data, m.Params.SessionID)
 	case "Page.loadEventFired":
-		if e.Params.FrameID == "" { // main frame only
+		if m.Params.FrameID == "" { // main frame only
 			s.loadOnce.Do(func() { close(s.loadCh) })
 		}
 	}
 }
 
-// ackScreencast writes a screencast frame ack without waiting for the
-// response. The response (an id with no pending call) is dropped by the
-// read loop. Must not block: it runs on the read-loop goroutine.
-func (s *cdpsession) ackScreencast(sessionID int64) {
-	id := s.nextIDOnly()
-	payload, err := json.Marshal(map[string]any{
-		"id":     id,
-		"method": "Page.screencastFrameAck",
-		"params": map[string]any{"sessionId": sessionID},
-	})
-	if err != nil {
-		return
+// handleFrame passes a screencast frame to the installed handler and acks
+// it so Chrome keeps streaming (it stalls delivery once unacked frames pile
+// up).
+func (s *cdpsession) handleFrame(frame []byte, sessionID int64) {
+	s.strMu.Lock()
+	fn := s.streamFn
+	s.strMu.Unlock()
+	if fn != nil {
+		if len(frame) == 0 {
+			slog.Debug("layer: empty screencast frame")
+		} else {
+			fn(frame)
+		}
 	}
-	_ = s.ws.Write(context.Background(), websocket.MessageText, payload)
+	s.ackScreencast(sessionID)
+}
+
+// ackScreencast writes a screencast frame ack without waiting for the
+// response (an id with no pending call, dropped by dispatch). It must not
+// block on a reply: it runs on the read-loop goroutine, the only one that
+// could read it — a blocking s.call here deadlocks.
+func (s *cdpsession) ackScreencast(sessionID int64) {
+	s.ackBuf = fmt.Appendf(s.ackBuf[:0],
+		`{"id":%d,"method":"Page.screencastFrameAck","params":{"sessionId":%d}}`,
+		s.nextIDOnly(), sessionID)
+	_ = s.ws.Write(context.Background(), websocket.MessageText, s.ackBuf)
 }
 
 // nextIDOnly reserves a CDP command id without registering a waiter.
