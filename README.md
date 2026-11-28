@@ -1,9 +1,20 @@
 # CtrlIRL-Coder
 
+
+![ctrlirl](hero.svg)
+
+<div style="float: left; margin-right: 20px;">
+<img src="logo-ctrlirl.png" alt="Ctrl-IRL" width="240" />
+</div>
+
+
 **CtrlIRL-Coder** is a Go rewrite of the original CtrlIRLCoder C tool: a
 GStreamer-based live encoder with **SRT output**, an **adaptive bitrate
 control loop**, an **OBS-like multi-layer scene compositor**, and **live
 config/scene reload** via `SIGHUP`.
+
+[![Build & Release](https://img.shields.io/github/actions/workflow/status/majklovec/ctrlirl-coder/release.yml?style=flat-square&label=release)](https://github.com/majklovec/ctrlirl-coder/actions)
+[![Version](https://img.shields.io/github/v/tag/majklovec/ctrlirl-coder?style=flat-square&label=version)](https://github.com/majklovec/ctrlirl-coder/releases)
 
 See [SPECS.md](SPECS.md) for the full specification and
 [IMPLEMENTATION.md](IMPLEMENTATION.md) for implementation progress and the
