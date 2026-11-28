@@ -189,7 +189,7 @@ func hasGPU() bool {
 // loads about:blank. Chrome is started with no URL argument and driven over
 // CDP, running under a throwaway HOME so it never collides with the user's own
 // Chrome session.
-func newCDPSession(ctx context.Context, url, audioSink string, w, h int) (*cdpsession, error) {
+func newCDPSession(ctx context.Context, url, audioSink string, w, h int) (_ *cdpsession, err error) {
 	bin, err := findChrome()
 	if err != nil {
 		return nil, err
@@ -198,21 +198,9 @@ func newCDPSession(ctx context.Context, url, audioSink string, w, h int) (*cdpse
 	if err != nil {
 		return nil, err
 	}
-	// Isolated HOME for this Chrome instance. Chrome's ProcessSingleton keys
-	// off the real profile dir; without this, launching collides with any
-	// other Chrome the user has open (SingletonLock: File exists) and the
-	// headless process aborts. Pointing HOME/XDG at a throwaway dir keeps the
-	// overlay's browser fully independent of the user's session.
-	userDir, err := os.MkdirTemp("", "ctrlirl-chrome-*")
+	userDir, err := newChromeHome()
 	if err != nil {
 		return nil, err
-	}
-	profileDir := filepath.Join(userDir, "ud")
-	for _, d := range []string{profileDir, filepath.Join(userDir, ".config"), filepath.Join(userDir, ".cache")} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			os.RemoveAll(userDir)
-			return nil, err
-		}
 	}
 	s := &cdpsession{
 		userDir: userDir,
@@ -221,26 +209,80 @@ func newCDPSession(ctx context.Context, url, audioSink string, w, h int) (*cdpse
 		calls:   make(map[int]chan *cdpMessage, 8),
 		loadCh:  make(chan struct{}),
 	}
-
-	// The target URL is loaded via CDP after we connect; Chrome is started with
-	// no URL argument (headless=new rejects a URL + multiple targets).
-	target := url
-	if target == "" {
-		target = "about:blank"
+	s.cmd = exec.Command(bin, chromeArgs(userDir, port, audioSink, w, h)...)
+	s.cmd.Env = chromeEnv(userDir, audioSink)
+	if err := s.cmd.Start(); err != nil {
+		os.RemoveAll(userDir)
+		return nil, fmt.Errorf("layer: launch %s: %w", bin, err)
 	}
+	go func() {
+		_ = s.cmd.Wait()
+		close(s.done)
+	}()
+	// Chrome is running: from here every failure tears it down.
+	defer func() {
+		if err != nil {
+			s.stop()
+		}
+	}()
 
-	// Note: --user-data-dir MUST use the equals form. The space form is
-	// silently treated as a default dir and DevTools refuses to start.
+	if err := s.connect(ctx); err != nil {
+		return nil, err
+	}
+	// The target URL is loaded via CDP (headless=new rejects a URL argument
+	// + multiple targets).
+	if url == "" {
+		url = "about:blank"
+	}
+	if err := s.preparePage(ctx, url, w, h); err != nil {
+		return nil, err
+	}
+	// The page must have loaded before the first capture: a
+	// Page.startScreencast issued before the page paints streams zero
+	// frames, and an unpainted capture is blank. Bounded: a page that never
+	// fires load (a dead remote host) still gets the layer — the fallback
+	// polling captures whatever the page shows.
+	select {
+	case <-s.loadCh:
+	case <-time.After(10 * time.Second):
+	}
+	return s, nil
+}
+
+// newChromeHome creates the isolated HOME for one Chrome instance. Chrome's
+// ProcessSingleton keys off the real profile dir; without this, launching
+// collides with any other Chrome the user has open (SingletonLock: File
+// exists) and the headless process aborts. Pointing HOME/XDG at a throwaway
+// dir keeps the overlay's browser fully independent of the user's session.
+func newChromeHome() (string, error) {
+	userDir, err := os.MkdirTemp("", "ctrlirl-chrome-*")
+	if err != nil {
+		return "", err
+	}
+	for _, sub := range []string{chromeProfileDir, ".config", ".cache"} {
+		if err := os.MkdirAll(filepath.Join(userDir, sub), 0o755); err != nil {
+			os.RemoveAll(userDir)
+			return "", err
+		}
+	}
+	return userDir, nil
+}
+
+// chromeProfileDir is the profile directory inside a Chrome home.
+const chromeProfileDir = "ud"
+
+// chromeArgs is the command line of the layer's headless Chrome.
+func chromeArgs(userDir string, port int, audioSink string, w, h int) []string {
+	args := []string{
+		"--headless=new",
+		"--no-sandbox",
+	}
 	// Rendering backend (see renderBackendFlags). Hardware rendering keeps
 	// the page's requestAnimationFrame locked to the display refresh, which
 	// is what makes motion in the captured stream look smooth; SwiftShader
 	// is the fallback for machines without a usable GPU. The screencast
 	// capture path is unchanged (CDP Page.startScreencast reads compositor
 	// output regardless of the backend).
-	args := []string{
-		"--headless=new",
-		"--no-sandbox",
-	}
 	args = append(args, renderBackendFlags()...)
 	args = append(args,
 		"--hide-scrollbars",
@@ -253,18 +295,23 @@ func newCDPSession(ctx context.Context, url, audioSink string, w, h int) (*cdpse
 		// Equals form is mandatory: the space form ("--window-size 1280,720")
 		// leaves "1280,720" as a positional URL argument, which headless=new
 		// rejects with "Multiple targets are not supported".
-		"--window-size="+fmt.Sprintf("%d,%d", w, h),
+		fmt.Sprintf("--window-size=%d,%d", w, h),
 		"--remote-debugging-port="+strconv.Itoa(port),
 		"--remote-debugging-address=127.0.0.1",
-		"--user-data-dir="+profileDir,
+		// --user-data-dir MUST use the equals form too. The space form is
+		// silently treated as a default dir and DevTools refuses to start.
+		"--user-data-dir="+filepath.Join(userDir, chromeProfileDir),
 	)
 	if audioSink != "" {
 		args = append(args, "--audio-sink", audioSink)
 	}
+	return args
+}
 
-	s.cmd = exec.Command(bin, args...)
-	baseEnv := filterProxyEnv(os.Environ())
-	s.cmd.Env = append(baseEnv,
+// chromeEnv is Chrome's environment: the host's without proxy variables,
+// HOME/XDG pointed at the instance's own home, and the audio sink pin.
+func chromeEnv(userDir, audioSink string) []string {
+	env := append(filterProxyEnv(os.Environ()),
 		"HOME="+userDir,
 		"XDG_CONFIG_HOME="+filepath.Join(userDir, ".config"),
 		"XDG_CACHE_HOME="+filepath.Join(userDir, ".cache"),
@@ -275,63 +322,49 @@ func newCDPSession(ctx context.Context, url, audioSink string, w, h int) (*cdpse
 	// routed correctly without any pactl round trip. routeAudio remains as a
 	// fallback for the case where the env pin does not take.
 	if audioSink != "" {
-		s.cmd.Env = append(s.cmd.Env, "PULSE_SINK="+audioSink)
+		env = append(env, "PULSE_SINK="+audioSink)
 	}
-	if err := s.cmd.Start(); err != nil {
-		os.RemoveAll(userDir)
-		return nil, fmt.Errorf("layer: launch %s: %w", bin, err)
-	}
-	go func() {
-		_ = s.cmd.Wait()
-		close(s.done)
-	}()
+	return env
+}
 
+// connect waits for Chrome's page target, opens its DevTools websocket and
+// starts the read loop.
+func (s *cdpsession) connect(ctx context.Context) error {
 	wsURL, err := s.waitPageWS(ctx)
 	if err != nil {
-		s.stop()
-		return nil, err
+		return err
 	}
 	conn, _, err := websocket.Dial(ctx, wsURL, nil)
 	if err != nil {
-		s.stop()
-		return nil, fmt.Errorf("layer: chrome websocket: %w", err)
+		return fmt.Errorf("layer: chrome websocket: %w", err)
 	}
 	conn.SetReadLimit(cdpWebSocketReadLimit)
 	s.ws = conn
 	go s.readLoop()
+	return nil
+}
 
+// preparePage makes the page ready to capture: events on, transparent
+// background, target loaded, layout viewport pinned.
+func (s *cdpsession) preparePage(ctx context.Context, url string, w, h int) error {
 	if _, err := s.call(ctx, "Page.enable", nil); err != nil {
-		s.stop()
-		return nil, fmt.Errorf("layer: CDP Page.enable: %w", err)
+		return fmt.Errorf("layer: CDP Page.enable: %w", err)
 	}
-	// Transparent page background: captureScreenshot then emits PNG with an
-	// alpha channel instead of a white backdrop, so the layer composites
-	// over the stream instead of covering it.
+	// Transparent page background: frames then carry an alpha channel
+	// instead of a white backdrop, so the layer composites over the stream
+	// instead of covering it.
 	if _, err := s.call(ctx, "Emulation.setDefaultBackgroundColorOverride", map[string]any{
 		"color": map[string]any{"r": 0, "g": 0, "b": 0, "a": 0},
 	}); err != nil {
-		s.stop()
-		return nil, fmt.Errorf("layer: CDP transparent background: %w", err)
+		return fmt.Errorf("layer: CDP transparent background: %w", err)
 	}
-	// Chrome was launched with no URL; point the page target at the real one.
-	if _, err := s.call(ctx, "Page.navigate", map[string]any{"url": target}); err != nil {
-		s.stop()
-		return nil, fmt.Errorf("layer: CDP navigate: %w", err)
+	if _, err := s.call(ctx, "Page.navigate", map[string]any{"url": url}); err != nil {
+		return fmt.Errorf("layer: CDP navigate: %w", err)
 	}
 	if err := s.setViewport(w, h); err != nil {
-		s.stop()
-		return nil, fmt.Errorf("layer: CDP set viewport: %w", err)
+		return fmt.Errorf("layer: CDP set viewport: %w", err)
 	}
-	// The page must have loaded before the first capture: a
-	// Page.startScreencast issued before the page paints streams zero
-	// frames, and an unpainted capture is blank. Bounded: a page that never
-	// fires load (a dead remote host) still gets the layer — the fallback
-	// polling captures whatever the page shows.
-	select {
-	case <-s.loadCh:
-	case <-time.After(10 * time.Second):
-	}
-	return s, nil
+	return nil
 }
 
 // stop kills Chrome and removes the profile directory.
