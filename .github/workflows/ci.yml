@@ -330,12 +330,12 @@ jobs:
     #              latest Release that cut a tag
     #
     # Consumers sign-authenticate via the shipped public key:
-    #   curl -fsSL https://majklovec.github.io/ctrlirl-coder/deb/ctrlirl.asc -o /etc/apt/keyrings/ctrlirl.asc
-    #   deb [signed-by=/etc/apt/keyrings/ctrlirl.asc] https://majklovec.github.io/ctrlirl-coder/deb ctrlirl main
+    #   curl -fsSL https://majklovec.github.io/ctrlirl-coder/deb/ctrlirl-coder.asc -o /etc/apt/keyrings/ctrlirl-coder.asc
+    #   deb [signed-by=/etc/apt/keyrings/ctrlirl-coder.asc] https://majklovec.github.io/ctrlirl-coder/deb ctrlirl main
     #
     # Canonical apt layout: dists/ctrlirl/<component>/binary-<arch>/Packages.gz.
     # GPG-signed: consumers add the repo with [signed-by=] the shipped
-    # ctrlirl.asc. The main version is monotonic (semver tag), so
+    # ctrlirl-coder.asc. The main version is monotonic (semver tag), so
     # `apt upgrade` tracks the newest release.
     #
     # Triggers: every green CI push to main, and every successful Release
@@ -411,7 +411,7 @@ jobs:
             # Import the release GPG key (armored private key) into the runner's
             # default keyring; later steps on the same runner reuse it. The signed
             # Release (InRelease + Release.gpg) is produced in the Build step. The
-            # public key is written to site/deb/ctrlirl.asc so it ships in the
+            # public key is written to site/deb/ctrlirl-coder.asc so it ships in the
             # Pages deploy and consumers can [signed-by=] it.
             - if: steps.resolve.outputs.skip == 'false'
               name: Import GPG release key
@@ -512,7 +512,7 @@ jobs:
                   DIST="$SITE/dists/ctrlirl"
                   mkdir -p "$DIST"
                   # Ship the public key so consumers can [signed-by=] it.
-                  gpg --batch --yes --armor --export release@ctrlirl.local > "$SITE/ctrlirl.asc"
+                  gpg --batch --yes --armor --export release@ctrlirl.local > "$SITE/ctrlirl-coder.asc"
                   : > /tmp/comps
                   build() {
                     local comp=$1 srcdir=$2
@@ -558,7 +558,7 @@ jobs:
                   # file).
                   # Signing is REQUIRED: an UNAUTHENTICATED Release carrying a hash
                   # table makes apt 3.x (Ubuntu 26.04 / Pop!_OS) SILENTLY skip the
-                  # index fetch. Public key ships at site/deb/ctrlirl.asc.
+                  # index fetch. Public key ships at site/deb/ctrlirl-coder.asc.
                   archs=$(ls -d "$DIST"/*/binary-*/ 2>/dev/null | xargs -n1 basename | sed 's/^binary-//' | LC_ALL=C sort -u | tr '\n' ' ')
                   {
                     echo 'Origin: CtrlIRL'
@@ -606,14 +606,14 @@ jobs:
                     echo 'a{color:#0366d6}'
                     echo '</style></head><body>'
                     echo '<h1>CtrlIRL-Coder - deb packages</h1>'
-                    echo '<p>Static apt-style repository, GPG-signed - key at <a href="deb/ctrlirl.asc">deb/ctrlirl.asc</a>. Published by the CI <code>package-repo</code> job.</p>'
+                    echo '<p>Static apt-style repository, GPG-signed - key at <a href="deb/ctrlirl-coder.asc">deb/ctrlirl-coder.asc</a>. Published by the CI <code>package-repo</code> job.</p>'
                     echo '<h2>Package components</h2>'
                     echo '<table><tr><th>Component</th><th>Content</th><th>Versioning</th></tr>'
                     echo '<tr><td>main</td><td>release debs</td><td>release tags (e.g. 1.0.3-1)</td></tr></table>'
                     echo '<h2>Add the repository</h2>'
                     echo '<pre>  sudo mkdir -p /etc/apt/keyrings
-                    curl -fsSL https://majklovec.github.io/ctrlirl-coder/deb/ctrlirl.asc -o /etc/apt/keyrings/ctrlirl.asc
-                    echo "deb [signed-by=/etc/apt/keyrings/ctrlirl.asc] https://majklovec.github.io/ctrlirl-coder/deb ctrlirl main" | sudo tee /etc/apt/sources.list.d/ctrlirl-coder.list
+                    curl -fsSL https://majklovec.github.io/ctrlirl-coder/deb/ctrlirl-coder.asc -o /etc/apt/keyrings/ctrlirl-coder.asc
+                    echo "deb [signed-by=/etc/apt/keyrings/ctrlirl-coder.asc] https://majklovec.github.io/ctrlirl-coder/deb ctrlirl main" | sudo tee /etc/apt/sources.list.d/ctrlirl-coder.list
                     sudo apt-get update
                     sudo apt-get install ctrlirl-coder</pre>'
                     echo '<h2>Debs</h2>'
@@ -656,7 +656,7 @@ jobs:
                   # CtrlIRL-Coder - deb package repository
 
                   Single component `main` (release debs), signed with the key at
-                  `https://majklovec.github.io/ctrlirl-coder/deb/ctrlirl.asc`:
+                  `https://majklovec.github.io/ctrlirl-coder/deb/ctrlirl-coder.asc`:
 
                   | Component | Content | Versioning |
                   |---|---|---|
@@ -664,8 +664,8 @@ jobs:
 
                   ```sh
                   sudo mkdir -p /etc/apt/keyrings
-                  curl -fsSL https://majklovec.github.io/ctrlirl-coder/deb/ctrlirl.asc -o /etc/apt/keyrings/ctrlirl.asc
-                  echo "deb [signed-by=/etc/apt/keyrings/ctrlirl.asc] https://majklovec.github.io/ctrlirl-coder/deb ctrlirl main" | sudo tee /etc/apt/sources.list.d/ctrlirl-coder.list
+                  curl -fsSL https://majklovec.github.io/ctrlirl-coder/deb/ctrlirl-coder.asc -o /etc/apt/keyrings/ctrlirl-coder.asc
+                  echo "deb [signed-by=/etc/apt/keyrings/ctrlirl-coder.asc] https://majklovec.github.io/ctrlirl-coder/deb ctrlirl main" | sudo tee /etc/apt/sources.list.d/ctrlirl-coder.list
                   sudo apt-get update
                   sudo apt-get install ctrlirl-coder
                   ```
