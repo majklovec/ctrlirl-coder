@@ -152,3 +152,100 @@ func TestStallDetection(t *testing.T) {
 		t.Fatal("not stalled 250ms after the last frame (threshold 120ms)")
 	}
 }
+
+// drainFakesrc runs the puller over a finite fakesrc pipeline until EOS and
+// returns it, with every payload byte handed to send.
+func drainFakesrc(t *testing.T, buffers, size int, send Send) *Puller {
+	t.Helper()
+	gstutil.EnsureInit()
+	pip, el := fakesrcPipeline(t, buffers, size)
+	defer func() {
+		pip.SetState(gst.StateNull)
+		gobject.UnsafeObjectUnref(pip.As())
+	}()
+	p := Attach(el, 1000)
+	done := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		defer close(done)
+		p.Run(ctx, send)
+	}()
+	if err := pip.SetState(gst.StatePlaying); err != nil {
+		t.Fatalf("playing: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("pull loop did not exit after EOS")
+	}
+	return p
+}
+
+// TestDrainDeliversEveryByteInOrder pins the batching contract on the
+// production buffer size (188-byte TS packets): every pulled byte reaches the
+// send callback exactly once and in order, including the partial batch left
+// at EOS, and the counters agree with what was delivered.
+func TestDrainDeliversEveryByteInOrder(t *testing.T) {
+	const buffers = 1000
+	var (
+		got     []byte
+		batches int
+	)
+	p := drainFakesrc(t, buffers, tsPacketSize, func(b []byte) (int, error) {
+		if len(b) == 0 {
+			t.Error("send called with an empty batch")
+		}
+		got = append(got, b...) // the callee must not retain b
+		batches++
+		return len(b), nil
+	})
+
+	const want = buffers * tsPacketSize
+	if len(got) != want {
+		t.Fatalf("send received %d bytes, want %d", len(got), want)
+	}
+	// fakesrc filltype=pattern writes a byte counter that restarts in every
+	// buffer, so a dropped, duplicated or reordered buffer breaks the ramp.
+	for i, b := range got {
+		if b != byte(i%tsPacketSize) {
+			t.Fatalf("payload byte %d = %#02x, want %#02x (buffers lost or reordered)", i, b, byte(i%tsPacketSize))
+		}
+	}
+	if f := p.Frames(); f != buffers {
+		t.Errorf("Frames = %d, want %d", f, buffers)
+	}
+	if n := p.BytesPulled(); n != want {
+		t.Errorf("BytesPulled = %d, want %d", n, want)
+	}
+	if d := p.Dropped(); d != 0 {
+		t.Errorf("Dropped = %d, want 0", d)
+	}
+	if batches >= buffers {
+		t.Errorf("send ran %d times for %d buffers: buffers are not batched", batches, buffers)
+	}
+}
+
+// TestDrainSurvivesFailedSends pins the drop path: a failed send drops that
+// batch and the drain keeps going to EOS.
+func TestDrainSurvivesFailedSends(t *testing.T) {
+	const buffers = 2000
+	var calls, failed int
+	p := drainFakesrc(t, buffers, tsPacketSize, func(b []byte) (int, error) {
+		calls++
+		if calls%2 == 0 {
+			failed++
+			return 0, fmt.Errorf("link down")
+		}
+		return len(b), nil
+	})
+	if f := p.Frames(); f != buffers {
+		t.Errorf("Frames = %d, want %d (a failed send must not stop the drain)", f, buffers)
+	}
+	if failed == 0 {
+		t.Fatal("no send failed; the test needs at least two batches")
+	}
+	if p.Dropped() == 0 {
+		t.Error("Dropped = 0 after failed sends")
+	}
+}

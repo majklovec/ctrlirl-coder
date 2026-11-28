@@ -2,7 +2,6 @@ package browser
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -197,14 +196,9 @@ func (b *BrowserOverlay) runBrowser() {
 	streamStarted := make(chan struct{})
 	var streamStartedOnce sync.Once
 
-	// Screencast frames arrive on the CDP read-loop goroutine; decoding
-	// (~60 KB base64) is cheap and the box keeps only the latest.
-	sess.SetStreamHandler(func(data string, _ int64) {
-		frame, err := base64.StdEncoding.DecodeString(data)
-		if err != nil || len(frame) == 0 {
-			slog.Debug("layer: screencast frame decode failed", "id", b.L.ID, "err", err)
-			return
-		}
+	// Screencast frames arrive decoded on the CDP read-loop goroutine; the
+	// box keeps only the latest.
+	sess.SetStreamHandler(func(frame []byte) {
 		frames.Store(frame)
 		streamStartedOnce.Do(func() { close(streamStarted) })
 	})

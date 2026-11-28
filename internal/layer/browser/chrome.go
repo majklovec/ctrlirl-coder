@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -49,10 +50,10 @@ type cdpsession struct {
 	calls  map[int]chan *cdpResponse
 
 	// screencast frame sink, installed by the feeder before startScreencast.
-	// Called from readLoop with the base64 frame data + session id; the
-	// ack is sent here, so the handler must not write to the socket.
+	// Called from readLoop with the decoded PNG frame; the ack is sent by
+	// the session, so the handler must not write to the socket.
 	strMu    sync.Mutex
-	streamFn func(data string, sessionId int64)
+	streamFn func(frame []byte)
 
 	// loadCh closes on the main frame's Page.loadEventFired. A
 	// Page.startScreencast issued before the page has loaded streams no
@@ -339,10 +340,10 @@ func (s *cdpsession) setViewport(w, h int) error {
 }
 
 // SetStreamHandler installs the sink for Page.screencastFrame events.
-// The handler runs on the CDP read-loop goroutine and receives the base64
-// frame data plus the session id; the session acks the frame itself after
-// the handler returns, so the handler must not issue CDP calls.
-func (s *cdpsession) SetStreamHandler(fn func(data string, sessionId int64)) {
+// The handler runs on the CDP read-loop goroutine and receives the decoded
+// PNG frame, which it may keep; the session acks the frame itself after the
+// handler returns, so the handler must not issue CDP calls.
+func (s *cdpsession) SetStreamHandler(fn func(frame []byte)) {
 	s.strMu.Lock()
 	s.streamFn = fn
 	s.strMu.Unlock()
@@ -477,17 +478,23 @@ func (s *cdpsession) readLoop() {
 			}
 			return
 		}
-		var r cdpResponse
-		if json.Unmarshal(data, &r) != nil || r.ID == 0 {
-			s.streamEvent(data)
-			continue
-		}
-		s.mu.Lock()
-		if ch, ok := s.calls[r.ID]; ok {
-			ch <- &r
-		}
-		s.mu.Unlock()
+		s.dispatch(data)
 	}
+}
+
+// dispatch routes one CDP message: a response goes to its waiter, anything
+// else is a page event. Runs on the read-loop goroutine.
+func (s *cdpsession) dispatch(data []byte) {
+	var r cdpResponse
+	if json.Unmarshal(data, &r) != nil || r.ID == 0 {
+		s.streamEvent(data)
+		return
+	}
+	s.mu.Lock()
+	if ch, ok := s.calls[r.ID]; ok {
+		ch <- &r
+	}
+	s.mu.Unlock()
 }
 
 // streamEvent handles CDP page events (id==0, no pending call):
@@ -512,7 +519,12 @@ func (s *cdpsession) streamEvent(raw []byte) {
 		fn := s.streamFn
 		s.strMu.Unlock()
 		if fn != nil {
-			fn(e.Params.Data, e.Params.SessionID)
+			frame, err := base64.StdEncoding.DecodeString(e.Params.Data)
+			if err != nil || len(frame) == 0 {
+				slog.Debug("layer: screencast frame decode failed", "err", err)
+			} else {
+				fn(frame)
+			}
 		}
 		// Ack so Chrome keeps streaming (it stalls delivery once unacked
 		// frames pile up). Fire-and-forget write: a blocking s.call here
