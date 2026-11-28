@@ -45,19 +45,19 @@ type Uplink struct {
 
 	conn *net.UDPConn
 
-	mu         sync.Mutex
-	ring       [pktRingSz]int32 // 0 = empty slot, else last sent data SN
-	nextIdx    int
-	inFlight   int
-	window     int
-	lastRecv   time.Time // zero = never active
-	lastSent   time.Time
-	dead       bool // force-timeout flag (send failure / housekeeping)
-	regDone    bool
-	weight     float64  // hysteresis-smoothed enhanced score
-	rttMs      uint32   // last measured RTT (0 = unknown → no penalty)
-	nakBurst   [4]int32 // NAK counts within the last four 1s slots
-	nakBurstAt int64    // seconds the nakBurst epoch maps to
+	mu       sync.Mutex
+	ring     [pktRingSz]int32 // 0 = empty slot, else last sent data SN
+	nextIdx  int
+	inFlight int
+	window   int
+	lastRecv time.Time // zero = never active
+	lastSent time.Time
+	dead     bool // force-timeout flag (send failure / housekeeping)
+	regDone  bool
+	weight   float64 // hysteresis-smoothed enhanced score
+	rttMs    uint32  // last measured RTT (0 = unknown → no penalty)
+	nakSec   int64   // wall-clock second nakCount belongs to
+	nakCount int32   // NAKs seen during nakSec
 }
 
 // NewUplink builds an unconnected uplink. ip is the local address a
@@ -320,30 +320,25 @@ func (u *Uplink) RegisterNAK(sn int32) bool {
 	return found
 }
 
-// noteNAK counts a NAK in the 1-second rolling burst window (the enhanced
+// noteNAK counts a NAK in the current one-second bucket (the enhanced
 // penalty needs ≥5 NAKs in a short window). Caller must hold u.mu.
 func (u *Uplink) noteNAK() {
-	nowSec := u.now().Unix()
-	if u.nakBurstAt == 0 {
-		u.nakBurstAt = nowSec
-		for i := range u.nakBurst {
-			u.nakBurst[i] = 0
-		}
+	if sec := u.now().Unix(); sec != u.nakSec {
+		u.nakSec, u.nakCount = sec, 0
 	}
-	for nowSec-u.nakBurstAt >= 4 {
-		for i := range u.nakBurst {
-			u.nakBurst[i] = 0
-		}
-		u.nakBurstAt++
-	}
-	u.nakBurst[(int(nowSec)-int(u.nakBurstAt))%4]++
+	u.nakCount++
 }
 
-// NAKBurst returns the NAK count of the last second (enhanced scoring).
+// NAKBurst returns the NAK count of the current second (enhanced scoring);
+// 0 once that second has passed. The bucket is matched by its second, so a
+// wall clock that steps (NTP) reads as an empty bucket.
 func (u *Uplink) NAKBurst() int32 {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	return u.nakBurst[(int(u.now().Unix())-int(u.nakBurstAt))%4]
+	if u.now().Unix() != u.nakSec {
+		return 0
+	}
+	return u.nakCount
 }
 
 // SetRTT stores the last measured RTT in milliseconds (0 = unknown).

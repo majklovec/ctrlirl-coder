@@ -163,3 +163,51 @@ func TestWindowGrowthCap(t *testing.T) {
 		t.Fatalf("Window exceeded cap: %d > %d", got, WindowMax*WindowMult)
 	}
 }
+
+// nakBurst NAKs n fresh packets on u.
+func nakBurst(u *Uplink, first, n int32) {
+	for sn := first; sn < first+n; sn++ {
+		u.NoteSent(sn)
+		u.RegisterNAK(sn)
+	}
+}
+
+// A NAK burst counts for the second it happened in and then expires. The
+// old four-slot ring re-read its stale slot every fourth second, so one loss
+// episode kept penalising the uplink for a second in every four, forever.
+func TestNAKBurstExpires(t *testing.T) {
+	fc := &fakeClock{t: time.Unix(1_000_000, 0)}
+	u := NewUplink(1, "127.0.0.1", testCfg(), fc.Now)
+	nakBurst(u, 1, 10)
+	if got := u.NAKBurst(); got != 10 {
+		t.Fatalf("NAKBurst in the burst's second = %d, want 10", got)
+	}
+	for sec := 1; sec <= 12; sec++ {
+		fc.add(time.Second)
+		if got := u.NAKBurst(); got != 0 {
+			t.Fatalf("NAKBurst %d s after the burst = %d, want 0", sec, got)
+		}
+	}
+	// A new burst starts a fresh count.
+	nakBurst(u, 100, 3)
+	if got := u.NAKBurst(); got != 3 {
+		t.Fatalf("NAKBurst of a later burst = %d, want 3", got)
+	}
+}
+
+// The burst window is keyed on wall-clock seconds. A clock that steps back
+// (NTP correcting a freshly booted encoder) used to index the ring with a
+// negative offset and panic — on the per-packet scheduling path.
+func TestNAKBurstSurvivesClockStepBack(t *testing.T) {
+	fc := &fakeClock{t: time.Unix(1_000_000, 0)}
+	u := NewUplink(1, "127.0.0.1", testCfg(), fc.Now)
+	nakBurst(u, 1, 6)
+	fc.add(-3 * time.Second)
+	if got := u.NAKBurst(); got != 0 {
+		t.Fatalf("NAKBurst after the clock stepped back = %d, want 0", got)
+	}
+	nakBurst(u, 100, 2) // must not panic either
+	if got := u.NAKBurst(); got != 2 {
+		t.Fatalf("NAKBurst of a burst after the step = %d, want 2", got)
+	}
+}
