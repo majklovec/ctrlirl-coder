@@ -129,7 +129,7 @@ func TestTimeout(t *testing.T) {
 	}
 	// Past the connection timeout it times out again.
 	fc.add(time.Duration(cfg.ConnTimeoutMs)*time.Millisecond + time.Millisecond)
-	u.lastSentNow()
+	u.markSent(fc.Now())
 	if !u.TimedOut() {
 		t.Fatalf("outgoing traffic must not keep an unresponsive uplink alive")
 	}

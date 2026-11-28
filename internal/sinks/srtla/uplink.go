@@ -3,6 +3,7 @@ package srtla
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 )
@@ -41,7 +42,7 @@ type Uplink struct {
 	IP   string  // the local source address
 	cfg  *Config // sender-wide config (window-independent)
 	now  func() time.Time
-	dest *net.UDPAddr // receiver endpoint (swapped on failover)
+	dest netip.AddrPort // receiver endpoint (swapped on failover); guarded by mu
 
 	conn *net.UDPConn
 
@@ -58,6 +59,40 @@ type Uplink struct {
 	rttMs    uint32  // last measured RTT (0 = unknown → no penalty)
 	nakSec   int64   // wall-clock second nakCount belongs to
 	nakCount int32   // NAKs seen during nakSec
+
+	// Enhanced-scheduler bookkeeping. It outlives Reset on purpose: a
+	// re-registered path keeps its recent NAK history.
+	lastNAK time.Time // zero = never NAKed
+	stalls  int       // consecutive marks with a full, non-draining backlog
+}
+
+// schedState is the snapshot of an uplink a scheduler ranks by.
+type schedState struct {
+	usable   bool    // confirmed by the receiver (REG3) and not timed out
+	window   int     // congestion window (window units * WindowMult)
+	inFlight int     // unACKed data packets
+	rttMs    uint32  // last measured RTT, 0 = unknown
+	nakBurst int32   // NAKs in the current second
+	stalls   int     // consecutive non-draining marks
+	weight   float64 // previous smoothed enhanced score
+}
+
+// schedState reads everything a scheduler needs under one lock.
+func (u *Uplink) schedState(now time.Time) schedState {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	st := schedState{
+		usable:   u.regDone && !u.timedOutLocked(now),
+		window:   u.window,
+		inFlight: u.inFlight,
+		rttMs:    u.rttMs,
+		stalls:   u.stalls,
+		weight:   u.weight,
+	}
+	if now.Unix() == u.nakSec {
+		st.nakBurst = u.nakCount
+	}
+	return st
 }
 
 // NewUplink builds an unconnected uplink. ip is the local address a
@@ -73,16 +108,26 @@ func NewUplink(id int, ip string, cfg *Config, now func() time.Time) *Uplink {
 
 // SetDest swaps the receiver endpoint (address failover).
 func (u *Uplink) SetDest(d *net.UDPAddr) {
+	var ap netip.AddrPort
+	if d != nil {
+		ap = unmapAddrPort(d.AddrPort())
+	}
 	u.mu.Lock()
-	u.dest = d
+	u.dest = ap
 	u.mu.Unlock()
 }
 
-func (u *Uplink) isReceiver(src *net.UDPAddr) bool {
+// isReceiver reports whether a datagram's source is the receiver endpoint.
+func (u *Uplink) isReceiver(src netip.AddrPort) bool {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	return u.dest != nil && src.Port == u.dest.Port &&
-		src.IP.Equal(u.dest.IP) && src.Zone == u.dest.Zone
+	return u.dest.IsValid() && unmapAddrPort(src) == u.dest
+}
+
+// unmapAddrPort normalizes an IPv4-mapped IPv6 address to plain IPv4, so
+// endpoints compare equal whichever form the socket layer hands out.
+func unmapAddrPort(ap netip.AddrPort) netip.AddrPort {
+	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
 }
 
 // Connect (re)opens and binds the socket. Replaces any existing socket, as
@@ -131,26 +176,43 @@ func (u *Uplink) Close() {
 	u.mu.Unlock()
 }
 
-// Send delivers a datagram toward the current receiver endpoint.
+// Send delivers a control datagram toward the current receiver endpoint.
 func (u *Uplink) Send(b []byte) error {
 	u.mu.Lock()
 	c, d := u.conn, u.dest
 	u.mu.Unlock()
+	return u.write(c, d, b, u.now())
+}
+
+// SendData relays one SRT datagram. A data packet (one carrying a sequence
+// number) is logged in the ring and counted in flight before the write, as
+// the reference does — whether or not the write then succeeds.
+func (u *Uplink) SendData(pkt []byte, now time.Time) error {
+	u.mu.Lock()
+	c, d := u.conn, u.dest
+	if seq := SeqNumber(pkt); seq >= 0 {
+		u.noteSentLocked(seq)
+	}
+	u.mu.Unlock()
+	return u.write(c, d, pkt, now)
+}
+
+// write sends b on socket c and, on success, stamps the send time.
+func (u *Uplink) write(c *net.UDPConn, dest netip.AddrPort, b []byte, now time.Time) error {
 	if c == nil {
 		return fmt.Errorf("srtla: uplink %d (%s) not connected", u.ID, u.IP)
 	}
-	if _, err := c.WriteToUDP(b, d); err != nil {
+	if _, err := c.WriteToUDPAddrPort(b, dest); err != nil {
 		return err
 	}
-	u.lastSentNow()
+	u.markSent(now)
 	return nil
 }
 
-// lastSentNow bumps the send timestamp (kept separate so callers that send
-// through a pre-fetched socket can still record activity).
-func (u *Uplink) lastSentNow() {
+// markSent stamps the last successful send (keepalive idle timer, stats).
+func (u *Uplink) markSent(now time.Time) {
 	u.mu.Lock()
-	u.lastSent = u.now()
+	u.lastSent = now
 	u.mu.Unlock()
 }
 
@@ -160,13 +222,6 @@ func (u *Uplink) MarkDead() {
 	u.mu.Lock()
 	u.dead = true
 	u.mu.Unlock()
-}
-
-// Score is the reference's selection metric: window / (inFlight + 1).
-func (u *Uplink) Score() int {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	return u.window / (u.inFlight + 1)
 }
 
 // Window exposes the congestion window (window units * WindowMult).
@@ -200,16 +255,17 @@ func (u *Uplink) RegDone() {
 // TimedOut reports whether no packet has arrived within the configured
 // connection timeout (the reference's CONN_TIMEOUT gate).
 func (u *Uplink) TimedOut() bool {
+	now := u.now()
 	u.mu.Lock()
-	dead, lr := u.dead, u.lastRecv
-	u.mu.Unlock()
-	if dead {
+	defer u.mu.Unlock()
+	return u.timedOutLocked(now)
+}
+
+func (u *Uplink) timedOutLocked(now time.Time) bool {
+	if u.dead || u.lastRecv.IsZero() {
 		return true
 	}
-	if lr.IsZero() {
-		return true
-	}
-	return u.now().Sub(lr) > time.Duration(u.cfg.ConnTimeoutMs)*time.Millisecond
+	return now.Sub(u.lastRecv) > time.Duration(u.cfg.ConnTimeoutMs)*time.Millisecond
 }
 
 // LastActivity returns the most recent receive/send timestamp.
@@ -226,10 +282,14 @@ func (u *Uplink) LastActivity() time.Time {
 // NoteSent records a data packet in the ring and raises the in-flight count.
 func (u *Uplink) NoteSent(sn int32) {
 	u.mu.Lock()
+	u.noteSentLocked(sn)
+	u.mu.Unlock()
+}
+
+func (u *Uplink) noteSentLocked(sn int32) {
 	u.ring[u.nextIdx] = sn
 	u.nextIdx = (u.nextIdx + 1) % pktRingSz
 	u.inFlight++
-	u.mu.Unlock()
 }
 
 // RingIndex is the reference's get_pkt_idx (wrap arithmetic).
@@ -248,6 +308,7 @@ func RingIndex(idx, inc int) int {
 func (u *Uplink) RegisterACK(sn int32) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	u.stalls = 0 // an ACK means the backlog is draining
 	idx := RingIndex(u.nextIdx, -1)
 	for i := 0; i < pktRingSz && !ringEq(u.ring[idx], sn); i++ {
 		idx = RingIndex(idx, -1)
@@ -273,6 +334,7 @@ func (u *Uplink) RegisterACK(sn int32) {
 func (u *Uplink) RegisterSRTAck(ack int32) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	u.stalls = 0 // an ACK means the backlog is draining
 	count := 0
 	idx := RingIndex(u.nextIdx, -1)
 	for i := 0; i < pktRingSz; i++ {
@@ -323,10 +385,28 @@ func (u *Uplink) RegisterNAK(sn int32) bool {
 // noteNAK counts a NAK in the current one-second bucket (the enhanced
 // penalty needs ≥5 NAKs in a short window). Caller must hold u.mu.
 func (u *Uplink) noteNAK() {
-	if sec := u.now().Unix(); sec != u.nakSec {
+	now := u.now()
+	if sec := now.Unix(); sec != u.nakSec {
 		u.nakSec, u.nakCount = sec, 0
 	}
 	u.nakCount++
+	u.lastNAK = now
+}
+
+// noteUnacked is the enhanced scheduler's stall mark, taken after SRTLA ACKs
+// were applied: a backlog still at enhancedStallThreshold counts as one more
+// stall, anything less clears the count. A recent NAK leaves the count alone.
+func (u *Uplink) noteUnacked(now time.Time) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if !u.lastNAK.IsZero() && now.Sub(u.lastNAK) < enhancedNAKQuiet {
+		return
+	}
+	if u.inFlight >= enhancedStallThreshold {
+		u.stalls++
+	} else {
+		u.stalls = 0
+	}
 }
 
 // NAKBurst returns the NAK count of the current second (enhanced scoring);
