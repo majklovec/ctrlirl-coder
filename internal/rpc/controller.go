@@ -178,12 +178,11 @@ func (c *Controller) replaceLocked(ctx context.Context, nx *scene.Scene) ([]scen
 	// One freeze/thaw around the whole batch, not per RemoveLayer — per-op
 	// state cycles make a multi-layer switch stall the stream seconds
 	// (each READY→PLAYING re-prerolls compositor + encoder + mux).
-	if len(ops) > 1 {
-		if b, ok := c.ap.(scene.Batcher); ok {
-			_ = b.SuspendStream(ctx)
-			defer func() { _ = b.ResumeStream(ctx) }()
-		}
+	resume, err := scene.Suspend(ctx, c.ap, ops)
+	if err != nil {
+		return nil, err // nothing applied yet
 	}
+	defer resume()
 	old := c.cur
 	for i, op := range ops {
 		if err := scene.ApplyOp(ctx, c.ap, op); err != nil {

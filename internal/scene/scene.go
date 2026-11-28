@@ -264,43 +264,38 @@ func Diff(from, to *Scene) []Op {
 	fromL := indexByID(from)
 	toL := indexByID(to)
 
-	var (
-		removes []Op
-		adds    []Op
-		updates []Op
-	)
+	var removes, updates, adds []Op
 	for id, nl := range toL {
-		ol, ok := fromL[id]
-		switch {
-		case !ok:
-			adds = append(adds, Op{Kind: OpAdd, ID: nl.ID, Layer: nl})
-		case chainRebuild(ol, nl):
-			// type/source/text/text-options/filters are baked into the
-			// element chain at build time — the compositor cannot splice
-			// elements into a running chain, so the layer is torn down and
-			// re-attached (removes are ordered before adds, so the z-order
-			// is re-established by the add).
-			removes = append(removes, Op{Kind: OpRemove, ID: nl.ID})
-			adds = append(adds, Op{Kind: OpAdd, ID: nl.ID, Layer: nl})
-		case filtersInPlace(ol, nl):
-			// Same filter kinds in the same slots; only params of
-			// in-place-updatable filters (all element properties) changed.
-			// No teardown: the running elements get their properties set,
-			// so no Chrome restart, no mux pad churn (rebuilds renumber
-			// the mpegtsmux audio pads and reshuffle the TS programs),
-			// and no stream gap. Flag the changed slots on a copy so
-			// ApplyOp updates exactly those.
-			changed := nl
-			changed.Filters = append([]FilterSpec(nil), nl.Filters...)
-			for i := range changed.Filters {
-				if !maps.Equal(ol.Filters[i].Params, nl.Filters[i].Params) {
-					changed.Filters[i].inPlaceChanged = true
-				}
+		ol, existed := fromL[id]
+		if !existed {
+			adds = append(adds, Op{Kind: OpAdd, ID: id, Layer: nl})
+			continue
+		}
+		d := diffLayers(ol, nl)
+		if d.rebuild {
+			// Removes are ordered before adds, so the z-order is
+			// re-established by the add.
+			removes = append(removes, Op{Kind: OpRemove, ID: id})
+			adds = append(adds, Op{Kind: OpAdd, ID: id, Layer: nl})
+			continue
+		}
+		if d.props {
+			// Compositor-pad properties: an in-place pad update.
+			updates = append(updates, Op{Kind: OpUpdateProps, ID: id, Layer: nl})
+		}
+		if len(d.filters) > 0 {
+			// Only params of in-place-updatable filters changed. No
+			// teardown: the running elements get their properties set, so
+			// no Chrome restart, no mux pad churn (rebuilds renumber the
+			// mpegtsmux audio pads and reshuffle the TS programs), and no
+			// stream gap. Flag the changed slots on a copy so ApplyOp
+			// updates exactly those.
+			flagged := nl
+			flagged.Filters = slices.Clone(nl.Filters)
+			for _, i := range d.filters {
+				flagged.Filters[i].inPlaceChanged = true
 			}
-			updates = append(updates, Op{Kind: OpUpdateFilter, ID: nl.ID, Layer: changed})
-		case layerChanged(ol, nl):
-			// Compositor-pad properties only: an in-place pad update.
-			updates = append(updates, Op{Kind: OpUpdateProps, ID: nl.ID, Layer: nl})
+			updates = append(updates, Op{Kind: OpUpdateFilter, ID: id, Layer: flagged})
 		}
 	}
 	for id := range fromL {
@@ -309,18 +304,15 @@ func Diff(from, to *Scene) []Op {
 		}
 	}
 
-	// Deterministic ordering: removes (by id), then updates (by id), then adds
-	// (by ascending zorder so the base layer is attached first).
-	byID := func(a, b Op) int { return cmp.Compare(a.ID, b.ID) }
+	// Deterministic ordering: removes (by id), then updates (by id, pad
+	// properties before filters), then adds (by ascending zorder so the base
+	// layer is attached first).
+	byID := func(a, b Op) int { return cmp.Or(cmp.Compare(a.ID, b.ID), cmp.Compare(a.Kind, b.Kind)) }
 	slices.SortFunc(removes, byID)
 	slices.SortFunc(updates, byID)
 	slices.SortFunc(adds, func(a, b Op) int { return cmp.Compare(zof(a), zof(b)) })
 
-	var ops []Op
-	ops = append(ops, removes...)
-	ops = append(ops, updates...)
-	ops = append(ops, adds...)
-	return ops
+	return slices.Concat(removes, updates, adds)
 }
 
 func indexByID(s *Scene) map[string]Layer {
@@ -336,41 +328,68 @@ func indexByID(s *Scene) map[string]Layer {
 
 func zof(op Op) float64 { return op.Layer.Properties["zorder"] }
 
-// chainRebuild reports whether a property change is baked into the element
-// chain (type, source, text, text options, structural filter changes) and
-// therefore needs the remove+add rebuild in Diff. Param changes on
-// in-place-updatable filters and compositor-pad properties are in-place
-// updates.
+// layerDiff is how one layer differs between two scenes.
+type layerDiff struct {
+	rebuild bool  // the element chain must be torn down and rebuilt
+	props   bool  // compositor-pad properties changed
+	filters []int // filter slots whose params changed, updatable in place
+}
+
+// diffLayers classifies the change from a to b.
+//
+// Type, source, text, text options and the filter list's shape are baked
+// into the element chain at build time — the compositor cannot splice
+// elements into a running chain — so a change to any of them is a rebuild
+// (remove + add). Compositor-pad properties and params of in-place-updatable
+// filters are applied to the running layer.
 //
 // Browser layers are the exception on the pad side: their width/height set
 // the Chrome viewport and the appsrc caps, and their framerate sets the
 // feeder's capture cadence and the appsrc caps. All three are baked into
-// the running chain at build time — an in-place pad update would only move
-// the compositor box while the capture kept the old resolution/fps — so a
-// change to any of them takes the same remove+add rebuild as a source
-// change. x/y/zorder/alpha stay in-place (the compositor scales the
-// capture to the pad box).
-func chainRebuild(a, b Layer) bool {
-	if a.Type != b.Type || a.Source != b.Source || a.Text != b.Text {
-		return true
-	}
-	if a.Type == LayerTypeBrowser && browserChainPropsChanged(a, b) {
-		return true
-	}
+// the running chain — an in-place pad update would only move the compositor
+// box while the capture kept the old resolution/fps — so they rebuild too.
+// x/y/zorder/alpha stay in-place (the compositor scales the capture to the
+// pad box).
+func diffLayers(a, b Layer) layerDiff {
+	d := layerDiff{props: !maps.Equal(a.Properties, b.Properties)}
 	// maps.Equal treats nil and empty maps as equal: an empty (not nil)
 	// text-options map is not a chain change.
-	if !maps.Equal(a.TextOptions, b.TextOptions) {
-		return true
+	if a.Type != b.Type || a.Source != b.Source || a.Text != b.Text ||
+		!maps.Equal(a.TextOptions, b.TextOptions) ||
+		len(a.Filters) != len(b.Filters) ||
+		(a.Type == LayerTypeBrowser && browserChainPropsChanged(a, b)) {
+		d.rebuild = true
+		return d
 	}
-	return FiltersChanged(a, b) && !filtersInPlace(a, b)
+	allInPlace := true
+	for i, fa := range a.Filters {
+		fb := b.Filters[i]
+		if fa.Kind != fb.Kind {
+			d.rebuild = true
+			return d
+		}
+		if def, ok := LookupFilter(fa.Kind); !ok || !def.InPlace {
+			allInPlace = false
+		}
+		// Param values are JSON scalars (float64/string/bool, per the
+		// registry type checks), so they compare with ==.
+		if !maps.Equal(fa.Params, fb.Params) {
+			d.filters = append(d.filters, i)
+		}
+	}
+	// In place only when every filter of the layer is in-place capable, not
+	// just the changed ones: a rollback re-applies every slot (ApplyOp).
+	if len(d.filters) > 0 && !allInPlace {
+		d.rebuild = true
+	}
+	return d
 }
 
 // browserChainPropsChanged reports whether a browser layer's width, height
-// or framerate changed. See chainRebuild for why those three force a
-// rebuild. A key present on only one side counts as a change: in the worst
-// case (value equals the layer package's 1280x720@30 default) that costs one
-// needless rebuild, while treating absent as default would risk a silent
-// no-op.
+// or framerate changed (see diffLayers). A key present on only one side
+// counts as a change: in the worst case (value equals the layer package's
+// 1280x720@30 default) that costs one needless rebuild, while treating
+// absent as default would risk a silent no-op.
 func browserChainPropsChanged(a, b Layer) bool {
 	for _, key := range []string{"width", "height", "framerate"} {
 		av, aOK := a.Properties[key]
@@ -380,35 +399,6 @@ func browserChainPropsChanged(a, b Layer) bool {
 		}
 	}
 	return false
-}
-
-// filtersInPlace reports whether the filter diff is a param-only change on
-// filters whose every param is a settable element property (same kinds in
-// the same slots, registry flags them in-place). Such a change is applied to
-// the running elements without tearing the chain down.
-func filtersInPlace(a, b Layer) bool {
-	if !FiltersChanged(a, b) || len(a.Filters) != len(b.Filters) {
-		return false
-	}
-	for i := range a.Filters {
-		if a.Filters[i].Kind != b.Filters[i].Kind {
-			return false
-		}
-		def, ok := LookupFilter(a.Filters[i].Kind)
-		if !ok || !def.InPlace {
-			return false
-		}
-	}
-	return true
-}
-
-// layerChanged reports whether any of a layer's fields changed (comparator
-// for the diff; chainRebuild decides the op kind).
-func layerChanged(a, b Layer) bool {
-	if chainRebuild(a, b) {
-		return true
-	}
-	return !maps.Equal(a.Properties, b.Properties)
 }
 
 // Applier is implemented by the running compositor. scene defines it so this
@@ -428,26 +418,44 @@ type Applier interface {
 }
 
 // Batcher is an optional Applier capability: it freezes the whole pipeline
-// (READY) before a multi-op batch and restores PLAYING afterwards, so a
-// scene switch stalls the stream once per batch instead of once per
-// RemoveLayer (each per-op freeze/thaw costs ~1s of re-preroll).
+// (READY) before a batch of ops and restores PLAYING afterwards, so a scene
+// switch stalls the stream once per batch instead of once per RemoveLayer
+// (each per-op freeze/thaw costs ~1s of re-preroll).
 type Batcher interface {
 	SuspendStream(ctx context.Context) error
 	ResumeStream(ctx context.Context) error
 }
 
-// ApplyDiff executes ops against the applier in order (removes, then updates,
-// then adds — the order produced by Diff). Batches of more than one op are
-// wrapped in a pipeline suspend/resume when the applier supports it.
-func ApplyDiff(ctx context.Context, a Applier, ops []Op) error {
-	if len(ops) > 1 {
-		if b, ok := a.(Batcher); ok {
-			if err := b.SuspendStream(ctx); err != nil {
-				return fmt.Errorf("scene: suspend batch: %w", err)
-			}
-			defer func() { _ = b.ResumeStream(ctx) }()
+// Suspend freezes the stream around a batch of ops when that pays off: the
+// applier can (Batcher) and the batch attaches or detaches more than one
+// chain. In-place updates never need the freeze — a batch of pad and filter
+// updates must not stall the stream. The returned function resumes the
+// stream; it is a no-op when nothing was suspended.
+func Suspend(ctx context.Context, a Applier, ops []Op) (resume func(), err error) {
+	structural := 0
+	for _, op := range ops {
+		if op.Kind == OpAdd || op.Kind == OpRemove {
+			structural++
 		}
 	}
+	b, ok := a.(Batcher)
+	if !ok || structural < 2 {
+		return func() {}, nil
+	}
+	if err := b.SuspendStream(ctx); err != nil {
+		return nil, fmt.Errorf("scene: suspend batch: %w", err)
+	}
+	return func() { _ = b.ResumeStream(ctx) }, nil
+}
+
+// ApplyDiff executes ops against the applier in order (removes, then updates,
+// then adds — the order produced by Diff), inside one Suspend.
+func ApplyDiff(ctx context.Context, a Applier, ops []Op) error {
+	resume, err := Suspend(ctx, a, ops)
+	if err != nil {
+		return err
+	}
+	defer resume()
 	for _, op := range ops {
 		if err := ApplyOp(ctx, a, op); err != nil {
 			return err
@@ -469,15 +477,9 @@ func ApplyOp(ctx context.Context, a Applier, op Op) error {
 		}
 	case OpUpdateFilter:
 		// The op carries the full target layer. Diff flags exactly the
-		// changed slots; rollback ops (unflagged) update every
-		// in-place-capable filter back to the old values.
-		anyFlagged := false
-		for _, spec := range op.Layer.Filters {
-			if spec.inPlaceChanged {
-				anyFlagged = true
-				break
-			}
-		}
+		// changed slots; rollback ops (unflagged) set every filter back to
+		// the old values.
+		anyFlagged := slices.ContainsFunc(op.Layer.Filters, func(f FilterSpec) bool { return f.inPlaceChanged })
 		for i, spec := range op.Layer.Filters {
 			if anyFlagged && !spec.inPlaceChanged {
 				continue
