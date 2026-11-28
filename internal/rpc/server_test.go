@@ -65,15 +65,16 @@ func (f *recApplier) UpdateLayerProps(ctx context.Context, id string, props map[
 		f.failNext, f.failed = false, "update:"+id
 		return errors.New("injected update failure")
 	}
-	f.ops = append(f.ops, "update:"+id)
-	if !f.blockNext {
-		return nil
-	}
-	f.blockNext = false
+	// The concurrency test polls count() from another goroutine while this
+	// op is in flight, so the record and the hook state are read under mu.
 	f.mu.Lock()
-	ch := f.releaseCh
+	f.ops = append(f.ops, "update:"+id)
+	block, ch := f.blockNext, f.releaseCh
+	f.blockNext = false
 	f.mu.Unlock()
-	<-ch
+	if block {
+		<-ch
+	}
 	return nil
 }
 func (f *recApplier) UpdateLayerFilter(ctx context.Context, id string, index int, spec scene.FilterSpec) error {
