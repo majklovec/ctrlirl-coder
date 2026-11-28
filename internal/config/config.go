@@ -54,7 +54,8 @@ type SRTParams struct {
 	URI        string `toml:"uri"`
 	StreamID   string `toml:"streamid"`
 	Passphrase string `toml:"passphrase"`
-	// MaxBandwidthKbps, when > 0, caps the SRT send rate (SRTO_MAXBW, kbit/s).
+	// MaxBandwidthKbps, when > 0, caps the SRT send rate in kbit/s (converted
+	// to the bytes/s SRTO_MAXBW takes).
 	MaxBandwidthKbps int `toml:"max_bandwidth_kbps"`
 }
 

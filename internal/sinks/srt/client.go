@@ -26,17 +26,17 @@ import (
 	"github.com/haivision/srtgo"
 )
 
-// writePollTimeout bounds a single *attempt* of the SRT Write. In non-blocking
-// mode srtgo's Write waits on this poll timeout before returning EAsyncSND
-// (send buffer not ready). 120 ms matches the default SRT latency and is the
-// per-attempt window.
+// writePollTimeout bounds one wait for write readiness inside the batched
+// send (sendbatch_cgo.go): when the SRT send buffer is full the C loop waits
+// this long on the socket's epoll before trying again. 120 ms matches the
+// default SRT latency.
 const writePollTimeout = 120 * time.Millisecond
 
-// writeBudget is the total time a single Write may spend (re)trying — i.e.
-// several poll attempts — before the buffer is dropped. The reference encoder
-// blocks in srt_send until the SRT send buffer drains; we approximate that by
-// retrying the non-blocking write for a bounded, pipeline-latency-scale window
-// (a few hundred ms) so a momentarily-full buffer is not shed. Bounded so a
+// writeBudget is the total time a single Write may spend waiting for the send
+// buffer — several poll waits — before the rest of the batch is dropped. The
+// reference encoder blocks in srt_send until the SRT send buffer drains; we
+// approximate that with a bounded, pipeline-latency-scale window (a few
+// hundred ms) so a momentarily-full buffer is not shed. Bounded so a
 // genuinely dead/congested link can't stall the GStreamer data path forever.
 const writeBudget = 400 * time.Millisecond
 
@@ -89,17 +89,12 @@ type ClientConfig struct {
 	LatencyMs  int
 	StreamID   string
 	Passphrase string
-	// MaxBandwidthKbps, when > 0, caps the SRT send rate (SRTO_MAXBW, kbps).
+	// MaxBandwidthKbps, when > 0, caps the SRT send rate in kbit/s.
 	MaxBandwidthKbps int
 }
 
-// NewClient parses the destination URI and prepares a (not-yet-connected)
-// sender. It does not block; call Start (or Dial) to connect.
-func NewClient(cfg ClientConfig, log *slog.Logger) (*Client, error) {
-	host, port, err := parseURI(cfg.URI)
-	if err != nil {
-		return nil, err
-	}
+// socketOptions maps the config onto srtgo socket options.
+func socketOptions(cfg ClientConfig) map[string]string {
 	opts := map[string]string{
 		// Live transport type: this is a live stream, and it also keeps the
 		// SRT payload cap at the 1316-byte live value that Write chunks to.
@@ -113,13 +108,24 @@ func NewClient(cfg ClientConfig, log *slog.Logger) (*Client, error) {
 		opts["passphrase"] = cfg.Passphrase
 	}
 	if cfg.MaxBandwidthKbps > 0 {
-		opts["maxbw"] = strconv.Itoa(cfg.MaxBandwidthKbps)
+		// SRTO_MAXBW is in bytes per second.
+		opts["maxbw"] = strconv.Itoa(cfg.MaxBandwidthKbps * 1000 / 8)
+	}
+	return opts
+}
+
+// NewClient parses the destination URI and prepares a (not-yet-connected)
+// sender. It does not block; call Start (or Dial) to connect.
+func NewClient(cfg ClientConfig, log *slog.Logger) (*Client, error) {
+	host, port, err := parseURI(cfg.URI)
+	if err != nil {
+		return nil, err
 	}
 	initSRT()
 	return &Client{
 		host: host,
 		port: port,
-		opts: opts,
+		opts: socketOptions(cfg),
 		cfg:  cfg,
 		log:  log,
 		done: make(chan struct{}),
@@ -129,8 +135,7 @@ func NewClient(cfg ClientConfig, log *slog.Logger) (*Client, error) {
 // parseURI extracts host and port from an srt:// URI. It also accepts a bare
 // host:port so tests don't have to write the scheme.
 func parseURI(uri string) (string, uint16, error) {
-	s := strings.TrimSpace(uri)
-	s = strings.TrimPrefix(s, "srt://")
+	s := strings.TrimPrefix(strings.TrimSpace(uri), "srt://")
 	if s == "" {
 		return "", 0, fmt.Errorf("empty SRT URI")
 	}
@@ -160,12 +165,6 @@ func (c *Client) Dial() error {
 		sock.Close()
 		return fmt.Errorf("srt: connect %s:%d: %w", c.host, c.port, err)
 	}
-	// Bound each write attempt: in non-blocking mode srtgo's Write waits on
-	// this poll timeout, then returns EAsyncSND (send buffer not ready) rather
-	// than blocking in C. Write() turns that into the bounded, Go-interruptible
-	// retry loop the reference's blocking srt_send behaves like, so one buffer
-	// can be held for a latency-scale window without stalling the pipeline.
-	sock.SetPollTimeout(writePollTimeout)
 	if old := c.sock.Swap(sock); old != nil {
 		old.Close()
 	}
