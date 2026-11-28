@@ -100,9 +100,9 @@ func (s *classicScheduler) Feedback(uplink *Uplink, sn int32, kind FeedbackKind,
 func (s *classicScheduler) MarkUnacked(*Uplink, time.Time) {}
 
 type enhancedScheduler struct {
-	// hyst holds the previous Select outcome so a trailing uplink within
-	// 10% sticks; the window map is per-uplink by pointer identity.
-	mu       sync.Mutex
+	mu sync.Mutex
+	// hystIdx is the previous Select outcome: that uplink keeps the pick
+	// while its score stays within 10% of the best.
 	hystIdx  int
 	log      *slog.Logger
 	lastNak  map[*Uplink]time.Time

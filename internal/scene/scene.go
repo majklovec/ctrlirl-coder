@@ -8,12 +8,13 @@
 package scene
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
 	"os"
-	"sort"
+	"slices"
 )
 
 // LayerType is the kind of a scene layer.
@@ -99,8 +100,8 @@ func (s *Scene) Finalize() error {
 }
 
 // Clone deep-copies the scene (layers, property maps, filters, param maps),
-// preserving nil-vs-empty maps, so the caller can mutate the clone without
-// touching the original.
+// preserving nil-vs-empty maps (maps.Clone keeps nil nil), so the caller can
+// mutate the clone without touching the original.
 func (s *Scene) Clone() *Scene {
 	if s == nil {
 		return nil
@@ -108,34 +109,12 @@ func (s *Scene) Clone() *Scene {
 	c := *s
 	c.Layers = make([]Layer, len(s.Layers))
 	for i, l := range s.Layers {
-		l.Properties = cloneFloatMap(l.Properties)
-		l.TextOptions = cloneStringMap(l.TextOptions)
+		l.Properties = maps.Clone(l.Properties)
+		l.TextOptions = maps.Clone(l.TextOptions)
 		l.Filters = cloneFilters(l.Filters)
 		c.Layers[i] = l
 	}
 	return &c
-}
-
-func cloneFloatMap(m map[string]float64) map[string]float64 {
-	if m == nil {
-		return nil
-	}
-	out := make(map[string]float64, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
-}
-
-func cloneStringMap(m map[string]string) map[string]string {
-	if m == nil {
-		return nil
-	}
-	out := make(map[string]string, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
 }
 
 func cloneFilters(fs []FilterSpec) []FilterSpec {
@@ -144,19 +123,8 @@ func cloneFilters(fs []FilterSpec) []FilterSpec {
 	}
 	out := make([]FilterSpec, len(fs))
 	for i, f := range fs {
-		f.Params = cloneAnyMap(f.Params)
+		f.Params = maps.Clone(f.Params)
 		out[i] = f
-	}
-	return out
-}
-
-func cloneAnyMap(m map[string]any) map[string]any {
-	if m == nil {
-		return nil
-	}
-	out := make(map[string]any, len(m))
-	for k, v := range m {
-		out[k] = v
 	}
 	return out
 }
@@ -325,7 +293,7 @@ func Diff(from, to *Scene) []Op {
 			changed := nl
 			changed.Filters = append([]FilterSpec(nil), nl.Filters...)
 			for i := range changed.Filters {
-				if !paramsEqual(ol.Filters[i].Params, nl.Filters[i].Params) {
+				if !maps.Equal(ol.Filters[i].Params, nl.Filters[i].Params) {
 					changed.Filters[i].inPlaceChanged = true
 				}
 			}
@@ -343,9 +311,10 @@ func Diff(from, to *Scene) []Op {
 
 	// Deterministic ordering: removes (by id), then updates (by id), then adds
 	// (by ascending zorder so the base layer is attached first).
-	sort.Slice(removes, func(i, j int) bool { return removes[i].ID < removes[j].ID })
-	sort.Slice(updates, func(i, j int) bool { return updates[i].ID < updates[j].ID })
-	sort.Slice(adds, func(i, j int) bool { return zof(adds[i]) < zof(adds[j]) })
+	byID := func(a, b Op) int { return cmp.Compare(a.ID, b.ID) }
+	slices.SortFunc(removes, byID)
+	slices.SortFunc(updates, byID)
+	slices.SortFunc(adds, func(a, b Op) int { return cmp.Compare(zof(a), zof(b)) })
 
 	var ops []Op
 	ops = append(ops, removes...)
@@ -365,12 +334,7 @@ func indexByID(s *Scene) map[string]Layer {
 	return m
 }
 
-func zof(op Op) float64 {
-	if op.Layer.Properties == nil {
-		return 0
-	}
-	return op.Layer.Properties["zorder"]
-}
+func zof(op Op) float64 { return op.Layer.Properties["zorder"] }
 
 // chainRebuild reports whether a property change is baked into the element
 // chain (type, source, text, text options, structural filter changes) and
@@ -444,16 +408,7 @@ func layerChanged(a, b Layer) bool {
 	if chainRebuild(a, b) {
 		return true
 	}
-	if len(a.Properties) != len(b.Properties) {
-		return true
-	}
-	for k, v := range b.Properties {
-		av, ok := a.Properties[k]
-		if !ok || av != v {
-			return true
-		}
-	}
-	return false
+	return !maps.Equal(a.Properties, b.Properties)
 }
 
 // Applier is implemented by the running compositor. scene defines it so this

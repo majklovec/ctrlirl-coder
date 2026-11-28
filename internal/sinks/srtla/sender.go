@@ -575,7 +575,7 @@ func (s *Sender) tick() {
 			continue
 		}
 		active++
-		if now.Sub(u.LastActivity()) > IDLE_KEEP {
+		if now.Sub(u.LastActivity()) > KeepaliveIdle {
 			s.sendKeepalive(u)
 		}
 	}
@@ -587,7 +587,7 @@ func (s *Sender) tick() {
 		if s.allFailedAt.IsZero() {
 			s.allFailedAt = now
 		}
-		if now.Sub(s.allFailedAt) > FAIL_OVER {
+		if now.Sub(s.allFailedAt) > FailoverAfter {
 			if s.destIdx+1 < len(s.dests) {
 				s.destIdx++
 				for _, u := range s.uplinks {

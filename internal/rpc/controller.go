@@ -1,26 +1,24 @@
-// Package rpc is the runtime remote control: a JSON-RPC 2.0 server on a Unix
-// socket (wire format in RPC.md) that edits the running scene — layers,
-// filters, named scenes — by mutating the scene descriptor and pushing the
-// diff through the scene.Applier (the compositor, which serializes the
-// pipeline mutations).
-//
-// The controller owns the authoritative copy of the running scene, so scene
-// file reloads (SIGHUP) and socket requests converge on one state machine.
-// It is pure Go: the applier is an interface, tests use a fake.
 package rpc
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"sort"
+	"maps"
+	"slices"
 	"sync"
 
 	"ctrlirl-coder/internal/scene"
 )
 
-// Controller is the scene state machine behind the JSON-RPC methods.
+// Controller is the scene state machine behind the JSON-RPC methods. It owns
+// the authoritative copy of the running scene, so scene file reloads (SIGHUP)
+// and RPC requests converge on one place: every edit mutates a copy of the
+// scene descriptor and pushes the diff through the scene.Applier (the
+// compositor, which serializes the pipeline mutations). Pure Go: the applier
+// is an interface, tests use a fake.
 type Controller struct {
 	mu     sync.Mutex
 	ap     scene.Applier
@@ -58,12 +56,7 @@ func (c *Controller) Current() *scene.Scene {
 func (c *Controller) SceneNames() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	names := make([]string, 0, len(c.scenes))
-	for n := range c.scenes {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	return names
+	return slices.Sorted(maps.Keys(c.scenes))
 }
 
 // Scene returns a named scene (deep copy). ok is false when unknown.
@@ -232,7 +225,7 @@ func (c *Controller) rollbackLocked(ctx context.Context, old *scene.Scene, done 
 	}
 	// z-order safety, stable within a kind: removes first, then updates,
 	// then adds.
-	sort.SliceStable(rb, func(i, j int) bool { return rollbackRank(rb[i]) < rollbackRank(rb[j]) })
+	slices.SortStableFunc(rb, func(a, b scene.Op) int { return cmp.Compare(rollbackRank(a), rollbackRank(b)) })
 	c.cur = old
 	if len(rb) > 0 {
 		if err := scene.ApplyDiff(ctx, c.ap, rb); err != nil {

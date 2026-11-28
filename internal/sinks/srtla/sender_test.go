@@ -490,7 +490,7 @@ func TestSenderFatalFailoverClosesUplinks(t *testing.T) {
 	}
 	defer s.Close()
 	s.mu.Lock()
-	s.allFailedAt = now.Add(-FAIL_OVER - time.Second)
+	s.allFailedAt = now.Add(-FailoverAfter - time.Second)
 	s.mu.Unlock()
 	s.tick()
 	if !s.Failover() {

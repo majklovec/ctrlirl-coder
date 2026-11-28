@@ -9,7 +9,7 @@
 //
 // A page reached over a raw CDP connection reports a 0x0 layout viewport
 // (innerWidth/innerHeight), and captureScreenshot hangs on that with "Cannot
-// take screenshot with 0 width" — so New always issues
+// take screenshot with 0 width" — so newCDPSession always issues
 // Emulation.setDeviceMetricsOverride before the first capture.
 //
 // Chrome's media stack does not honor the host's proxy environment, and the

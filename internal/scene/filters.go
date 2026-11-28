@@ -2,6 +2,7 @@ package scene
 
 import (
 	"fmt"
+	"maps"
 	"math"
 )
 
@@ -167,9 +168,7 @@ var filterRegistry = map[string]FilterDef{
 		},
 		TransformParams: func(p map[string]any) map[string]any {
 			out := make(map[string]any, len(p))
-			for k, v := range p {
-				out[k] = v
-			}
+			maps.Copy(out, p)
 			out["angle"] = effFloat(p, "angle") * math.Pi / 180.0
 			return out
 		},
@@ -416,7 +415,8 @@ func paramTypeErr(id string, j int, kind, key, want string, got any) error {
 }
 
 // FiltersChanged reports whether two layers' filter lists differ (order and
-// params), which forces a chain rebuild in the scene diff.
+// params). Param values are JSON scalars (float64/string/bool, per the
+// registry type checks), so they compare with ==.
 func FiltersChanged(a, b Layer) bool {
 	if len(a.Filters) != len(b.Filters) {
 		return true
@@ -425,24 +425,9 @@ func FiltersChanged(a, b Layer) bool {
 		if a.Filters[i].Kind != b.Filters[i].Kind {
 			return true
 		}
-		if !paramsEqual(a.Filters[i].Params, b.Filters[i].Params) {
+		if !maps.Equal(a.Filters[i].Params, b.Filters[i].Params) {
 			return true
 		}
 	}
 	return false
-}
-
-// paramsEqual compares two JSON-decoded param maps (float64/string/bool only,
-// per the registry type checks).
-func paramsEqual(a, b map[string]any) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, va := range a {
-		vb, ok := b[k]
-		if !ok || va != vb {
-			return false
-		}
-	}
-	return true
 }

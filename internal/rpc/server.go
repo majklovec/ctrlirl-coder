@@ -1,7 +1,9 @@
-// Package rpc is the JSON-RPC 2.0 control API: one HTTP handler mounted at
-// POST /rpc on the shared HTTPS server (internal/server). Bodies are
-// single JSON-RPC requests or 2.0 batches (arrays); the response mirrors
-// the request shape, or 204 when every request was a notification.
+// Package rpc is the runtime remote control: a JSON-RPC 2.0 API (wire format
+// in RPC.md) that edits the running scene — layers, filters, named scenes.
+// It is one HTTP handler mounted at POST /rpc on the shared plaintext HTTP
+// listener (internal/server). Bodies are single JSON-RPC requests or 2.0
+// batches (arrays); the response mirrors the request shape, or 204 when
+// every request was a notification.
 package rpc
 
 import (
@@ -47,14 +49,14 @@ type response struct {
 }
 
 // Server is the JSON-RPC 2.0 endpoint: one http.Handler driven by the
-// shared HTTPS server (POST /rpc). Drive it from curl -k, any HTTP client,
-// or JSON-RPC tooling.
+// shared HTTP listener (POST /rpc). Drive it from curl, any HTTP client, or
+// JSON-RPC tooling.
 type Server struct {
 	ctl     *Controller
 	methods map[string]handler
 }
 
-// New returns the handler for a control controller.
+// NewServer returns the handler for a control controller.
 func NewServer(ctl *Controller) *Server {
 	s := &Server{ctl: ctl}
 	s.methods = s.methodTable()
@@ -65,7 +67,7 @@ func NewServer(ctl *Controller) *Server {
 // an RPC error.
 type handler func(p json.RawMessage) (any, *errorObj)
 
-// maxRequestLine bounds one request line (4 MiB of JSON dwarfs any scene
+// maxRequestLine bounds one request body (4 MiB of JSON dwarfs any scene
 // edit; the bound stops a pathological peer from filling memory).
 const maxRequestLine = 4 * 1024 * 1024
 

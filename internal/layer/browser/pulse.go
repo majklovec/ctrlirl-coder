@@ -11,7 +11,7 @@ import (
 // pulseVirtualSink creates a Pulse/PipeWire null sink via pactl and returns a
 // closer that unloads it. The sink's monitor (<name>.monitor) is what the
 // audio chain reads. A missing pactl (no user audio session) is an error: the
-// browser layer then falls back to its test-tone audio.
+// browser layer then degrades to video-only.
 //
 // pactl load-module prints the module ID ("N: module-null-sink"); the closer
 // must unload by that ID. Unloading by sink name fails ("Access denied" on

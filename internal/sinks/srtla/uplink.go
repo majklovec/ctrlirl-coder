@@ -20,12 +20,12 @@ const (
 	MaxNAKEpoch = 10000
 )
 
-// IDLE_KEEP is how long an uplink may be idle before a keepalive is sent
-// (reference IDLE_TIME). FAIL_OVER is how long all uplinks may be dead
+// KeepaliveIdle is how long an uplink may be idle before a keepalive is sent
+// (reference IDLE_TIME). FailoverAfter is how long all uplinks may be dead
 // before walking the receiver chain (reference GLOBAL_TIMEOUT).
 const (
-	IDLE_KEEP = 1 * time.Second
-	FAIL_OVER = 10 * time.Second
+	KeepaliveIdle = 1 * time.Second
+	FailoverAfter = 10 * time.Second
 )
 
 // pktRingSz is the per-uplink log of recent data sequence numbers (the

@@ -10,10 +10,11 @@ import (
 	"ctrlirl-coder/internal/sinks"
 )
 
-// checkContract implements the §2.1 startup validation. It runs after PAUSED
-// (names resolve only once parsed, §7.9). Missing optional elements are
-// logged, not fatal; a missing encoder disables adaptive bitrate; a missing
-// terminal `appsink` on a pipeline expected to stream is an error.
+// checkContract implements the §2.1 startup validation. It runs on the freshly
+// parsed pipeline, still in NULL (names resolve once parsed, §7.9). Missing
+// optional elements are logged, not fatal; a missing encoder disables
+// adaptive bitrate; a missing terminal `appsink` on a pipeline expected to
+// stream is an error.
 //
 // It is called from New, before the command goroutine is handling commands;
 // reads of discovered fields (encoderName, bitrateUnits, tapEl, …) are safe
@@ -56,11 +57,10 @@ func (cp *CompositorPipeline) checkContract() {
 			// (Start), so the source branch stays VOD-pausable and
 			// backpressure works.
 			el.SetObjectProperty("drop", false)
-			// 600 buffers ≈ 20 s of TS packets at 6 Mbps. The default (200)
-			// fills within ~50 ms of sustained backpressure, so the
-			// CC-reset burst at every HLS segment boundary (~10 s) tips the
-			// queue over. 600 gives enough headroom that the burst is
-			// absorbed without a drop.
+			// One buffer is one 188-byte TS packet, so 600 buffers ≈ 113 kB ≈
+			// 150 ms at 6 Mbit/s. The default (200, ~50 ms) fills during
+			// the CC-reset burst at every HLS segment boundary (~10 s) and
+			// stalls the streaming thread; 600 gives the burst headroom.
 			if err := gstutil.SetNumericProperty(el, "max-buffers", int64(600)); err != nil {
 				slog.Warn("pipeline: appsink max-buffers set failed", "err", err)
 			}
