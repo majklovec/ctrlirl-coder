@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-gst/go-gst/pkg/gst"
 
+	"ctrlirl-coder/internal/gstutil"
 	"ctrlirl-coder/internal/layer"
 	"ctrlirl-coder/internal/scene"
 )
@@ -487,10 +488,10 @@ func (l *latestFrame) waitFirst() ([]byte, bool) {
 // accepts again. The same frame is re-pushed, so a freeze only costs
 // freshness (max one stale frame after resume), not the stream.
 // Returns false when the feeder must exit (stop / ctx / Chrome gone);
-// true once the frame was pushed (1) or dropped transiently (-1).
+// true once the frame was pushed, or dropped on any other flow error.
 func (b *BrowserOverlay) pushFrame(ctx context.Context, frame []byte, stoppeder interface{ Stopped() <-chan struct{} }) bool {
 	for {
-		if n := pushBuffer(b.appSrc, frame); n != 0 {
+		if gstutil.PushBytes(b.appSrc, frame) != gst.FlowFlushing {
 			return true
 		}
 		select {

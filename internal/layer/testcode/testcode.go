@@ -106,12 +106,7 @@ func (t *TestCodeSource) pushLoop() {
 func (t *TestCodeSource) pushFrame(frame *uint64) {
 	*frame++
 	data := t.renderer.render(time.Now(), *frame)
-	flow, err := pushAppSrcFeed(t.src, data)
-	if err != nil {
-		slog.Warn("layer: testcode push failed", "id", t.L.ID, "err", err)
-		return
-	}
-	switch flow {
+	switch flow := gstutil.PushBytes(t.src, data); flow {
 	case gst.FlowOK, gst.FlowFlushing:
 		// Flushing (pause/stop) is a normal transient — drop silently.
 	default:
