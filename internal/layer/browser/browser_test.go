@@ -35,21 +35,6 @@ func TestSanitizeSinkID(t *testing.T) {
 	}
 }
 
-func TestIntProp(t *testing.T) {
-	l := scene.Layer{Properties: map[string]float64{"framerate": 60, "quality": 0}}
-	if got := intProp(l, "framerate", 30); got != 60 {
-		t.Errorf("intProp framerate = %d, want 60", got)
-	}
-	// quality=0 is not > 0, so it falls back to the default.
-	if got := intProp(l, "quality", 75); got != 75 {
-		t.Errorf("intProp quality = %d, want 75 (0 falls back)", got)
-	}
-	// Missing key falls back.
-	if got := intProp(l, "width", 1280); got != 1280 {
-		t.Errorf("intProp width = %d, want 1280", got)
-	}
-}
-
 func TestNewBrowserOverlay_Basics(t *testing.T) {
 	l := scene.Layer{ID: "b1", Type: "browser", Source: "https://example.com"}
 	b := NewBrowserOverlay(l)

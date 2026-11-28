@@ -2,6 +2,7 @@ package layer
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/go-gst/go-gst/pkg/gst"
 
@@ -21,9 +22,6 @@ func MakeElement(kind, name string, props map[string]any) (gst.Element, error) {
 	}
 	var rest map[string]any
 	for k, v := range props {
-		// Integer values take the cgo g_object_setv path (a plain int/uint
-		// GValue is silently dropped by the varargs g_object_set in this
-		// build); everything else goes to the go-gst property setter.
 		var n int64
 		var isNum bool
 		switch val := v.(type) {
@@ -55,6 +53,40 @@ func MakeElement(kind, name string, props map[string]any) (gst.Element, error) {
 	return el, nil
 }
 
+// Spec describes one element to build.
+type Spec struct {
+	Factory string         // element factory ("videoconvert", "queue", ...)
+	Name    string         // element name, unique in the pipeline
+	Props   map[string]any // initial properties (see MakeElement), may be nil
+	Caps    string         // when set: the element's "caps" property (capsfilter, appsrc)
+}
+
+// Build makes the elements described by specs, in order. It stops at the
+// first element that cannot be built.
+func Build(specs ...Spec) ([]gst.Element, error) {
+	els := make([]gst.Element, 0, len(specs))
+	for _, sp := range specs {
+		el, err := MakeElement(sp.Factory, sp.Name, sp.Props)
+		if err != nil {
+			return nil, err
+		}
+		if sp.Caps != "" {
+			el.SetObjectProperty("caps", gst.CapsFromString(sp.Caps))
+		}
+		els = append(els, el)
+	}
+	return els, nil
+}
+
+// IntProp reads a scene property as a positive int, falling back to def
+// when it is absent or not positive.
+func IntProp(l scene.Layer, key string, def int) int {
+	if v, ok := l.Properties[key]; ok && v > 0 {
+		return int(v)
+	}
+	return def
+}
+
 // bgraCapsString builds the output caps for a layer, pinning width/height
 // when the scene provides both.
 func bgraCapsString(l scene.Layer) string {
@@ -67,42 +99,34 @@ func bgraCapsString(l scene.Layer) string {
 }
 
 // SurfaceChain builds head + video filters + BGRA tail — the chain shape
-// shared by the video/image/text builders.
+// every layer's video chain has. The chain is static; a layer with a
+// runtime-pad source sets DynamicSourceIndex on the result.
 func SurfaceChain(l scene.Layer, head ...gst.Element) (*Chain, error) {
 	filters, err := VideoFilters(l)
 	if err != nil {
 		return nil, err
 	}
-	tailEls, err := Tail(l)
+	tail, err := Tail(l)
 	if err != nil {
 		return nil, err
 	}
-	els := append(append([]gst.Element{}, head...), filters...)
-	// DynamicSourceIndex: -1 marks a static chain; the zero value 0 would
-	// make LinkChain treat Elements[0] as a dynamic source and skip the
-	// first link.
-	return &Chain{Elements: append(els, tailEls...), DynamicSourceIndex: -1}, nil
+	return StaticChain(slices.Concat(head, filters, tail)...), nil
+}
+
+// StaticChain is a chain without a runtime-pad source. (The -1 matters: the
+// zero value of DynamicSourceIndex would make LinkChain treat Elements[0]
+// as a dynamic source and skip the first link.)
+func StaticChain(els ...gst.Element) *Chain {
+	return &Chain{Elements: els, DynamicSourceIndex: -1}
 }
 
 // Tail builds the [videoconvert, videoscale, capsfilter(BGRA...), queue]
 // tail of a layer chain.
 func Tail(l scene.Layer) ([]gst.Element, error) {
-	conv, err := MakeElement("videoconvert", l.ID+"-conv", nil)
-	if err != nil {
-		return nil, err
-	}
-	scale, err := MakeElement("videoscale", l.ID+"-scale", nil)
-	if err != nil {
-		return nil, err
-	}
-	cf, err := MakeElement("capsfilter", l.ID+"-caps", nil)
-	if err != nil {
-		return nil, err
-	}
-	cf.SetObjectProperty("caps", gst.CapsFromString(bgraCapsString(l)))
-	q, err := MakeElement("queue", l.ID+"-queue", map[string]any{"max-size-buffers": 60})
-	if err != nil {
-		return nil, err
-	}
-	return []gst.Element{conv, scale, cf, q}, nil
+	return Build(
+		Spec{Factory: "videoconvert", Name: l.ID + "-conv"},
+		Spec{Factory: "videoscale", Name: l.ID + "-scale"},
+		Spec{Factory: "capsfilter", Name: l.ID + "-caps", Caps: bgraCapsString(l)},
+		Spec{Factory: "queue", Name: l.ID + "-queue", Props: map[string]any{"max-size-buffers": 60}},
+	)
 }

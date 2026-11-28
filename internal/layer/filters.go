@@ -2,109 +2,86 @@ package layer
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/go-gst/go-gst/pkg/gst"
 
 	"ctrlirl-coder/internal/scene"
 )
 
-// buildFilters realizes a layer's filter specs (of one format) as chain
-// elements, in scene order. Element names are `<id>-fNN-<kind>` so a scene
-// reload that rebuilds the chain cannot collide with live names.
-//
-// videoscale is the one spec that yields two elements: the scale element
-// plus a trailing capsfilter carrying the target width/height (the element
-// itself only conforms to the caps it is given).
-//
-// Video filters ride directly on the decoded caps. Decoders commonly emit
-// I420/Y420, and filters like `rotate` refuse those formats — the link
-// would fail, the layer's compositor pad would produce no buffer, and the
-// compositor (which needs every pad) would go fully black. A videoconvert
-// in front of the filter list negotiates a format every filter accepts.
-// specBuild is one resolved filter spec: the registry entry's effective
-// params, element factory, and element properties — resolved once per spec.
-type specBuild struct {
-	spec    scene.FilterSpec
-	params  map[string]any
-	factory string
-	props   map[string]any
+// filterElementName is the name of a filter chain element: `<id>-fNN-<what>`,
+// NN being its position among the elements of its format's filter list. The
+// names are stable per scene layer, so an in-place update can find the
+// running element (AudioFilterElementName) and a rebuilt chain cannot
+// collide with live names.
+func filterElementName(id string, pos int, what string) string {
+	return fmt.Sprintf("%s-f%02d-%s", id, pos, what)
 }
 
+// buildFilters realizes a layer's filter specs (of one format) as chain
+// elements, in scene order.
+//
+// Most filters are one element. Three things add more:
+//
+//   - Video filters ride directly on the decoded caps. Decoders commonly
+//     emit I420/Y420, and filters like `rotate` refuse those formats — the
+//     link would fail, the layer's compositor pad would produce no buffer,
+//     and the compositor (which needs every pad) would go fully black. A
+//     videoconvert in front of the list negotiates a format every filter
+//     accepts.
+//   - videoscale only conforms to the caps it is given, so a trailing
+//     capsfilter carries the target width/height.
+//   - videorotate gets a BGRA capsfilter (and a videoconvert when another
+//     filter follows), see below.
 func buildFilters(l scene.Layer, format scene.FilterFormat) ([]gst.Element, error) {
-	// Resolve every spec once (registry lookup + effective params + factory
-	// + element properties).
-	var builds []specBuild
-	for i, spec := range l.Filters {
-		def, ok := scene.LookupFilter(spec.Kind)
-		if !ok || def.Format != format {
-			continue
+	var specs []Spec
+	add := func(factory, what string, props map[string]any, caps string) {
+		specs = append(specs, Spec{Factory: factory, Name: filterElementName(l.ID, len(specs), what), Props: props, Caps: caps})
+	}
+	var filters []scene.FilterSpec
+	for _, f := range l.Filters {
+		if def, ok := scene.LookupFilter(f.Kind); ok && def.Format == format {
+			filters = append(filters, f)
 		}
-		eff := def.EffectiveParams(spec.Params)
+	}
+	for i, f := range filters {
+		def, _ := scene.LookupFilter(f.Kind)
+		eff := def.EffectiveParams(f.Params)
 		factory, err := def.FactoryFor(eff)
 		if err != nil {
-			return nil, fmt.Errorf("layer: %s filter %d (%s): %w", l.ID, i, spec.Kind, err)
+			return nil, fmt.Errorf("layer: %s filter %d (%s): %w", l.ID, i, f.Kind, err)
 		}
-		props := FilterElementProps(def, eff)
-		builds = append(builds, specBuild{spec: spec, params: eff, factory: factory, props: props})
-	}
+		add(factory, f.Kind, FilterElementProps(def, eff), "")
 
-	var els []gst.Element
-	if format == scene.FormatVideo && len(builds) > 0 {
-		conv, err := MakeElement("videoconvert", l.ID+"-fconv", nil)
-		if err != nil {
-			return nil, fmt.Errorf("layer: %s filter preconvert: %w", l.ID, err)
-		}
-		els = append(els, conv)
-	}
-	// Element names are `<id>-fNN-<kind>` (NN = position among this
-	// format's elements, incl. a videoscale's trailing capsfilter) so a
-	// scene reload that rebuilds the chain cannot collide with live names.
-	nameIdx := 0
-	for i, b := range builds {
-		name := fmt.Sprintf("%s-f%02d-%s", l.ID, nameIdx, b.spec.Kind)
-		el, err := MakeElement(b.factory, name, b.props)
-		if err != nil {
-			return nil, fmt.Errorf("layer: %s filter %d: %w", l.ID, i, err)
-		}
-		els = append(els, el)
-		nameIdx++
-
-		// rotate is GstGeometricTransform: it fill-cleans its output
-		// frame with memset(0) before mapping. That's transparent only
-		// in an alpha format — in an opaque one the corners come out as
-		// solid black, and the layer composites as a black box. Pin the
-		// rotate's output to BGRA so the un-mapped area carries alpha=0.
-		// If a later filter in the list follows, a videoconvert carries
-		// the format change (YUV-only filters like effectv can't keep
-		// the alpha — in that order the corners stay black, unavoidable).
-		if b.spec.Kind == "videorotate" {
-			ca, err := MakeElement("capsfilter", fmt.Sprintf("%s-f%02d-alpha", l.ID, nameIdx), nil)
+		switch f.Kind {
+		case "videorotate":
+			// rotate is GstGeometricTransform: it fill-cleans its output
+			// frame with memset(0) before mapping. That's transparent only
+			// in an alpha format — in an opaque one the corners come out as
+			// solid black, and the layer composites as a black box. Pin the
+			// rotate's output to BGRA so the un-mapped area carries alpha=0.
+			// If a later filter in the list follows, a videoconvert carries
+			// the format change (YUV-only filters like effectv can't keep
+			// the alpha — in that order the corners stay black, unavoidable).
+			add("capsfilter", "alpha", nil, "video/x-raw,format=BGRA")
+			if i+1 < len(filters) {
+				add("videoconvert", "postconv", nil, "")
+			}
+		case "videoscale":
+			caps, err := scaleCaps(eff)
 			if err != nil {
-				return nil, fmt.Errorf("layer: %s filter %d: rotate alpha capsfilter: %w", l.ID, i, err)
+				return nil, fmt.Errorf("layer: %s filter %d: %w", l.ID, i, err)
 			}
-			ca.SetObjectProperty("caps", gst.CapsFromString("video/x-raw,format=BGRA"))
-			els = append(els, ca)
-			nameIdx++
-			if i+1 < len(builds) {
-				cc, err := MakeElement("videoconvert", fmt.Sprintf("%s-f%02d-postconv", l.ID, nameIdx), nil)
-				if err != nil {
-					return nil, fmt.Errorf("layer: %s filter %d: rotate postconvert: %w", l.ID, i, err)
-				}
-				els = append(els, cc)
-				nameIdx++
-			}
+			add("capsfilter", "scalecaps", nil, caps)
 		}
-
-		// videoscale: the target size is enforced by a capsfilter right
-		// after the scaler (width only, height only, or both).
-		if b.spec.Kind == "videoscale" {
-			cf := capsfilterForScale(l.ID, nameIdx, b.params)
-			if cf == nil {
-				return nil, fmt.Errorf("layer: %s filter %d: videoscale capsfilter missing", l.ID, i)
-			}
-			els = append(els, cf)
-			nameIdx++
-		}
+	}
+	if format == scene.FormatVideo && len(specs) > 0 {
+		// The pre-convert is named outside the fNN sequence.
+		specs = slices.Insert(specs, 0, Spec{Factory: "videoconvert", Name: l.ID + "-fconv"})
+	}
+	els, err := Build(specs...)
+	if err != nil {
+		return nil, fmt.Errorf("layer: %s filters: %w", l.ID, err)
 	}
 	return els, nil
 }
@@ -143,20 +120,21 @@ func FilterElementProps(def scene.FilterDef, eff map[string]any) map[string]any 
 	return params
 }
 
-// AudioFilterElementName returns the chain element name assigned to audio
-// filter index i (NN = position among the layer's audio-format filters,
-// matching buildFilters' naming).
+// AudioFilterElementName returns the chain element name of the filter at
+// index i of l.Filters, which must be an audio filter. (Audio filters are
+// one element each, so the position among the audio filters is the NN of
+// the name buildFilters gave it.)
 func AudioFilterElementName(l scene.Layer, i int) (string, bool) {
-	nn := 0
-	for j, spec := range l.Filters {
-		def, ok := scene.LookupFilter(spec.Kind)
+	pos := 0
+	for j, f := range l.Filters {
+		def, ok := scene.LookupFilter(f.Kind)
 		if !ok || def.Format != scene.FormatAudio {
 			continue
 		}
 		if j == i {
-			return fmt.Sprintf("%s-f%02d-%s", l.ID, nn, spec.Kind), true
+			return filterElementName(l.ID, pos, f.Kind), true
 		}
-		nn++
+		pos++
 	}
 	return "", false
 }
@@ -175,30 +153,22 @@ func SetFilterElementProps(el gst.Element, spec scene.FilterSpec) error {
 	return nil
 }
 
-// capsfilterForScale builds the trailing capsfilter for a videoscale filter.
-// A bare "0" dimension keeps the current value (the scene registry requires
-// at least one of the two).
-func capsfilterForScale(id string, idx int, eff map[string]any) gst.Element {
-	var dim string
-	w, h := int(eff["width"].(float64)), int(eff["height"].(float64))
+// scaleCaps is the caps a videoscale filter is pinned to: width only, height
+// only, or both (a 0 dimension keeps the incoming value).
+func scaleCaps(eff map[string]any) (string, error) {
+	w, _ := eff["width"].(float64)
+	h, _ := eff["height"].(float64)
 	switch {
 	case w > 0 && h > 0:
-		dim = fmt.Sprintf("width=%d,height=%d", w, h)
+		return fmt.Sprintf("video/x-raw,width=%d,height=%d", int(w), int(h)), nil
 	case w > 0:
-		dim = fmt.Sprintf("width=%d", w)
+		return fmt.Sprintf("video/x-raw,width=%d", int(w)), nil
 	case h > 0:
-		dim = fmt.Sprintf("height=%d", h)
-	default:
-		// The scene registry rejects a videoscale without a dimension, so
-		// a nil result here means an unvalidated spec slipped through.
-		return nil
+		return fmt.Sprintf("video/x-raw,height=%d", int(h)), nil
 	}
-	cf, err := MakeElement("capsfilter", fmt.Sprintf("%s-f%02d-scalecaps", id, idx), nil)
-	if err != nil {
-		return nil
-	}
-	cf.SetObjectProperty("caps", gst.CapsFromString("video/x-raw,"+dim))
-	return cf
+	// The scene registry rejects a videoscale without a dimension, so this
+	// is an unvalidated spec.
+	return "", fmt.Errorf("videoscale: neither width nor height set")
 }
 
 // VideoFilters returns the layer's video filter elements (empty, not nil,

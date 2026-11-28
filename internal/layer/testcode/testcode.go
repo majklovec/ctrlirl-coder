@@ -48,34 +48,32 @@ func NewTestCodeSource(l scene.Layer) *TestCodeSource {
 // returns the chain (unlinked; see Layer.BuildChain).
 func (t *TestCodeSource) BuildChain() (*layer.Chain, error) {
 	r := t.renderer
-	dur := r.frameDuration().Nanoseconds()
-
-	src, err := layer.MakeElement("appsrc", t.L.ID+"-src", map[string]any{
-		"is-live":      true,
-		"do-timestamp": true,
-		"format":       gst.FormatTime,
-		"max-bytes":    16 << 20,
-		"block":        false,
-		"emit-signals": false,
+	head, err := layer.Build(layer.Spec{
+		Factory: "appsrc", Name: t.L.ID + "-src",
+		Props: map[string]any{
+			"is-live":      true,
+			"do-timestamp": true,
+			"format":       gst.FormatTime,
+			"max-bytes":    16 << 20,
+			"block":        false,
+			"emit-signals": false,
+			"duration":     r.frameDuration().Nanoseconds(),
+		},
+		Caps: fmt.Sprintf("video/x-raw,format=BGRA,width=%d,height=%d,framerate=%d/1", r.w, r.h, r.fps),
 	})
 	if err != nil {
 		return nil, err
-	}
-	src.SetObjectProperty("caps", gst.CapsFromString(fmt.Sprintf(
-		"video/x-raw,format=BGRA,width=%d,height=%d,framerate=%d/1", r.w, r.h, r.fps)))
-	if err := gstutil.SetNumericProperty(src, "duration", dur); err != nil {
-		return nil, fmt.Errorf("layer: testcode %s: %w", t.L.ID, err)
 	}
 
 	slog.Info("layer: testcode source",
 		"id", t.L.ID, "width", r.w, "height", r.h, "fps", r.fps)
 
-	chain, err := layer.SurfaceChain(t.L, src)
+	chain, err := layer.SurfaceChain(t.L, head...)
 	if err != nil {
 		return nil, err
 	}
 
-	t.src = src
+	t.src = head[0]
 	t.wg.Add(1)
 	go t.pushLoop()
 

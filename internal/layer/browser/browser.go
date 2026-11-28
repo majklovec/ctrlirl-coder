@@ -88,41 +88,35 @@ func NewBrowserOverlay(l scene.Layer) *BrowserOverlay {
 func (b *BrowserOverlay) BuildChain() (*layer.Chain, error) {
 	b.parseConfig()
 
-	fail := func(format string, args ...any) (*layer.Chain, error) {
-		return nil, fmt.Errorf(format, args...)
-	}
-
-	appSrc, err := layer.MakeElement("appsrc", b.L.ID+"-src", map[string]any{
-		"is-live":      true,
-		"do-timestamp": true,
-		// Single frame of latency: at most one buffer is queued and a full
-		// queue drops the OLDEST (leaky-type=2 = downstream), so a slow
-		// downstream tick can never build backlog — the freshest frame
-		// always wins. block=false alone does not drop (it just makes push
-		// fail on overflow), so the leaky type is what bounds the queue.
-		"block":       false,
-		"max-buffers": 1,
-		"leaky-type":  2, // GST_APP_LEAKY_TYPE_DOWNSTREAM
-	})
+	head, err := layer.Build(
+		layer.Spec{
+			Factory: "appsrc", Name: b.L.ID + "-src",
+			Props: map[string]any{
+				"is-live":      true,
+				"do-timestamp": true,
+				// Single frame of latency: at most one buffer is queued and a
+				// full queue drops the OLDEST (leaky-type=2 = downstream), so
+				// a slow downstream tick can never build backlog — the
+				// freshest frame always wins. block=false alone does not drop
+				// (it just makes push fail on overflow), so the leaky type is
+				// what bounds the queue.
+				"block":       false,
+				"max-buffers": 1,
+				"leaky-type":  2, // GST_APP_LEAKY_TYPE_DOWNSTREAM
+			},
+			Caps: fmt.Sprintf("image/png,width=%d,height=%d,framerate=%d/1", b.width, b.height, b.fps),
+		},
+		// pngdec is a static-pad decoder: the chain is static.
+		layer.Spec{Factory: "pngdec", Name: b.L.ID + "-pngdec"},
+	)
 	if err != nil {
-		return fail("layer: %v", err)
+		return nil, err
 	}
-	appSrc.SetObjectProperty("caps", gst.CapsFromString(fmt.Sprintf(
-		"image/png,width=%d,height=%d,framerate=%d/1", b.width, b.height, b.fps)))
-	b.appSrc = appSrc
-
-	dec, err := layer.MakeElement("pngdec", b.L.ID+"-pngdec", nil)
+	chain, err := layer.SurfaceChain(b.L, head...)
 	if err != nil {
-		return fail("layer: %v", err)
+		return nil, err
 	}
-	vfilters, err := layer.VideoFilters(b.L)
-	if err != nil {
-		return fail("layer: %v", err)
-	}
-	tail, err := layer.Tail(b.L)
-	if err != nil {
-		return fail("layer: %v", err)
-	}
+	b.appSrc = head[0]
 
 	// Audio: a per-layer Pulse/PipeWire null sink gives the page's audio a
 	// dedicated monitor to record from. Without a user audio session the
@@ -145,10 +139,7 @@ func (b *BrowserOverlay) BuildChain() (*layer.Chain, error) {
 	slog.Info("layer: browser overlay",
 		"id", b.L.ID, "url", b.url, "width", b.width, "height", b.height,
 		"fps", b.fps, "audio", b.hasAudio)
-	els := append([]gst.Element{appSrc, dec}, vfilters...)
-	els = append(els, tail...)
-	// DynamicSourceIndex: -1; pngdec is a static pad source, see layer.SurfaceChain.
-	return &layer.Chain{Elements: els, DynamicSourceIndex: -1}, nil
+	return chain, nil
 }
 
 // runBrowser launches Chrome, connects CDP, then runs the two-phase feed:
@@ -540,31 +531,25 @@ func (b *BrowserOverlay) AudioChain() (*layer.Chain, error) {
 	if !b.hasAudio {
 		return nil, nil
 	}
-	fail := func(format string, args ...any) (*layer.Chain, error) {
-		return nil, fmt.Errorf(format, args...)
-	}
-	src, err := layer.MakeElement("pulsesrc", b.L.ID+"-audsrc", map[string]any{
-		"device": b.sink + ".monitor",
-	})
+	head, err := layer.Build(
+		layer.Spec{Factory: "pulsesrc", Name: b.L.ID + "-audsrc", Props: map[string]any{
+			"device": b.sink + ".monitor",
+		}},
+		layer.Spec{Factory: "audioconvert", Name: b.L.ID + "-audconv"},
+	)
 	if err != nil {
-		return fail("layer: %v", err)
-	}
-	conv, err := layer.MakeElement("audioconvert", b.L.ID+"-audconv", nil)
-	if err != nil {
-		return fail("layer: %v", err)
+		return nil, err
 	}
 	// Audio filters (volume, equalizer, audiodynamic, pitch) sit between the
 	// converter and the tail; they operate on raw PCM, which the
 	// compositor's shared audiomixer then combines with the other layers.
 	// The mixer takes the chains' native (float) format — no capsfilter:
 	// audiomixer sink pads do not accept S16LE and reject a pinned link.
-	afilters, err := layer.AudioFilters(b.L)
+	filters, err := layer.AudioFilters(b.L)
 	if err != nil {
-		return fail("layer: %v", err)
+		return nil, err
 	}
-	els := append([]gst.Element{src, conv}, afilters...)
-	// DynamicSourceIndex: -1; the audio chain has no dynamic pads.
-	return &layer.Chain{Elements: els, DynamicSourceIndex: -1}, nil
+	return layer.StaticChain(append(head, filters...)...), nil
 }
 
 // DefaultProperties returns the compositor-pad properties for this layer.
@@ -603,23 +588,9 @@ func (b *BrowserOverlay) Close() error {
 // legacy "quality" property is ignored (capture is lossless PNG now).
 func (b *BrowserOverlay) parseConfig() {
 	b.url = b.L.Source
-	b.width = intProp(b.L, "width", browserDefaultWidth)
-	b.height = intProp(b.L, "height", browserDefaultHeight)
-	b.fps = intProp(b.L, "framerate", browserDefaultFPS)
-	if b.width <= 0 {
-		b.width = browserDefaultWidth
-	}
-	if b.height <= 0 {
-		b.height = browserDefaultHeight
-	}
-}
-
-// intProp reads a scene property as a positive int, falling back to def.
-func intProp(l scene.Layer, key string, def int) int {
-	if v, ok := l.Properties[key]; ok && v > 0 {
-		return int(v)
-	}
-	return def
+	b.width = layer.IntProp(b.L, "width", browserDefaultWidth)
+	b.height = layer.IntProp(b.L, "height", browserDefaultHeight)
+	b.fps = layer.IntProp(b.L, "framerate", browserDefaultFPS)
 }
 
 // sanitizeSinkID makes a scene layer id safe for a Pulse sink name.

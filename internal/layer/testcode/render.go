@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"time"
 
+	"ctrlirl-coder/internal/layer"
 	"ctrlirl-coder/internal/scene"
 )
 
@@ -53,17 +54,11 @@ type testcodeRenderer struct {
 // newTestcodeRenderer reads the surface size/fps from the scene properties
 // (width/height/framerate), defaulting to 1280x720@30.
 func newTestcodeRenderer(l scene.Layer) *testcodeRenderer {
-	r := &testcodeRenderer{w: defaultSurfaceW, h: defaultSurfaceH, fps: defaultFPS}
-	if v, ok := l.Properties["width"]; ok && v > 0 {
-		r.w = int(v)
+	return &testcodeRenderer{
+		w:   layer.IntProp(l, "width", defaultSurfaceW),
+		h:   layer.IntProp(l, "height", defaultSurfaceH),
+		fps: layer.IntProp(l, "framerate", defaultFPS),
 	}
-	if v, ok := l.Properties["height"]; ok && v > 0 {
-		r.h = int(v)
-	}
-	if v, ok := l.Properties["framerate"]; ok && v > 0 {
-		r.fps = int(v)
-	}
-	return r
 }
 
 // frameDuration is one tick of the layer's framerate.
