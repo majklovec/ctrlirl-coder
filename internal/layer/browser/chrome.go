@@ -9,7 +9,7 @@
 //
 // A page reached over a raw CDP connection reports a 0x0 layout viewport
 // (innerWidth/innerHeight), and captureScreenshot hangs on that with "Cannot
-// take screenshot with 0 width" — so New always issues
+// take screenshot with 0 width" — so newCDPSession always issues
 // Emulation.setDeviceMetricsOverride before the first capture.
 //
 // Chrome's media stack does not honor the host's proxy environment, and the
@@ -17,11 +17,13 @@
 package browser
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -30,6 +32,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/coder/websocket"
@@ -46,13 +49,15 @@ type cdpsession struct {
 
 	mu     sync.Mutex
 	nextID int
-	calls  map[int]chan *cdpResponse
+	calls  map[int]chan *cdpMessage
+
+	ackBuf []byte // frame-ack scratch; read-loop goroutine only
 
 	// screencast frame sink, installed by the feeder before startScreencast.
-	// Called from readLoop with the base64 frame data + session id; the
-	// ack is sent here, so the handler must not write to the socket.
+	// Called from readLoop with the decoded PNG frame; the ack is sent by
+	// the session, so the handler must not write to the socket.
 	strMu    sync.Mutex
-	streamFn func(data string, sessionId int64)
+	streamFn func(frame []byte)
 
 	// loadCh closes on the main frame's Page.loadEventFired. A
 	// Page.startScreencast issued before the page has loaded streams no
@@ -62,13 +67,33 @@ type cdpsession struct {
 	loadCh   chan struct{}
 }
 
-// cdpResponse is a DevTools response envelope. Result stays a map: a
-// json.RawMessage result field makes the whole envelope decode ~2x slower
-// (benchmarked), and the capture path decodes its own "data" field from it.
-type cdpResponse struct {
-	ID     int            `json:"id"`
-	Result map[string]any `json:"result"`
-	Error  *cdpCError     `json:"error"`
+// cdpMessage is one DevTools message: a command response (ID set) or a page
+// event (Method set). It is decoded in ONE pass into typed fields: the frame
+// payloads are megabyte-scale base64 strings arriving up to 60 times a
+// second, and a []byte field lets encoding/json base64-decode them straight
+// out of the message — no map[string]any, no intermediate string, no second
+// parse to tell an event from a response.
+type cdpMessage struct {
+	ID     int        `json:"id"`
+	Method string     `json:"method"`
+	Params cdpParams  `json:"params"`
+	Result cdpResult  `json:"result"`
+	Error  *cdpCError `json:"error"`
+}
+
+// cdpParams holds the event parameters the session reads.
+type cdpParams struct {
+	Data      []byte `json:"data"`      // Page.screencastFrame: the PNG
+	SessionID int64  `json:"sessionId"` // Page.screencastFrame: echoed in the ack
+	FrameID   string `json:"frameId"`
+}
+
+// cdpResult holds the command results the session reads.
+type cdpResult struct {
+	Data   []byte `json:"data"` // Page.captureScreenshot: the PNG
+	Result struct {
+		Value any `json:"value"` // Runtime.evaluate (returnByValue)
+	} `json:"result"`
 }
 
 type cdpCError struct {
@@ -165,7 +190,7 @@ func hasGPU() bool {
 // loads about:blank. Chrome is started with no URL argument and driven over
 // CDP, running under a throwaway HOME so it never collides with the user's own
 // Chrome session.
-func newCDPSession(ctx context.Context, url, audioSink string, w, h int) (*cdpsession, error) {
+func newCDPSession(ctx context.Context, url, audioSink string, w, h int) (_ *cdpsession, err error) {
 	bin, err := findChrome()
 	if err != nil {
 		return nil, err
@@ -174,85 +199,21 @@ func newCDPSession(ctx context.Context, url, audioSink string, w, h int) (*cdpse
 	if err != nil {
 		return nil, err
 	}
-	// Isolated HOME for this Chrome instance. Chrome's ProcessSingleton keys
-	// off the real profile dir; without this, launching collides with any
-	// other Chrome the user has open (SingletonLock: File exists) and the
-	// headless process aborts. Pointing HOME/XDG at a throwaway dir keeps the
-	// overlay's browser fully independent of the user's session.
-	userDir, err := os.MkdirTemp("", "ctrlirl-chrome-*")
+	userDir, err := newChromeHome()
 	if err != nil {
 		return nil, err
-	}
-	profileDir := filepath.Join(userDir, "ud")
-	for _, d := range []string{profileDir, filepath.Join(userDir, ".config"), filepath.Join(userDir, ".cache")} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			os.RemoveAll(userDir)
-			return nil, err
-		}
 	}
 	s := &cdpsession{
 		userDir: userDir,
 		port:    port,
 		done:    make(chan struct{}),
-		calls:   make(map[int]chan *cdpResponse, 8),
+		calls:   make(map[int]chan *cdpMessage, 8),
 		loadCh:  make(chan struct{}),
 	}
-
-	// The target URL is loaded via CDP after we connect; Chrome is started with
-	// no URL argument (headless=new rejects a URL + multiple targets).
-	target := url
-	if target == "" {
-		target = "about:blank"
-	}
-
-	// Note: --user-data-dir MUST use the equals form. The space form is
-	// silently treated as a default dir and DevTools refuses to start.
-	// Rendering backend (see renderBackendFlags). Hardware rendering keeps
-	// the page's requestAnimationFrame locked to the display refresh, which
-	// is what makes motion in the captured stream look smooth; SwiftShader
-	// is the fallback for machines without a usable GPU. The screencast
-	// capture path is unchanged (CDP Page.startScreencast reads compositor
-	// output regardless of the backend).
-	args := []string{
-		"--headless=new",
-		"--no-sandbox",
-	}
-	args = append(args, renderBackendFlags()...)
-	args = append(args,
-		"--hide-scrollbars",
-		"--no-first-run",
-		"--no-default-browser-check",
-		"--disable-background-timer-throttling",
-		"--disable-renderer-backgrounding",
-		"--disable-backgrounding-occlusion",
-		"--autoplay-policy=no-user-gesture-required",
-		// Equals form is mandatory: the space form ("--window-size 1280,720")
-		// leaves "1280,720" as a positional URL argument, which headless=new
-		// rejects with "Multiple targets are not supported".
-		"--window-size="+fmt.Sprintf("%d,%d", w, h),
-		"--remote-debugging-port="+strconv.Itoa(port),
-		"--remote-debugging-address=127.0.0.1",
-		"--user-data-dir="+profileDir,
-	)
-	if audioSink != "" {
-		args = append(args, "--audio-sink", audioSink)
-	}
-
-	s.cmd = exec.Command(bin, args...)
-	baseEnv := filterProxyEnv(os.Environ())
-	s.cmd.Env = append(baseEnv,
-		"HOME="+userDir,
-		"XDG_CONFIG_HOME="+filepath.Join(userDir, ".config"),
-		"XDG_CACHE_HOME="+filepath.Join(userDir, ".cache"),
-	)
-	// PULSE_SINK pins every stream this Chrome instance creates onto the
-	// layer's null sink at the process level (PulseAudio and PipeWire-Pulse
-	// both honor it), so audio arriving minutes later (a donation alert) is
-	// routed correctly without any pactl round trip. routeAudio remains as a
-	// fallback for the case where the env pin does not take.
-	if audioSink != "" {
-		s.cmd.Env = append(s.cmd.Env, "PULSE_SINK="+audioSink)
-	}
+	s.cmd = exec.Command(bin, chromeArgs(userDir, port, audioSink, w, h)...)
+	s.cmd.Env = chromeEnv(userDir, audioSink)
+	// Its own process group, so stop() can kill the whole tree.
+	s.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := s.cmd.Start(); err != nil {
 		os.RemoveAll(userDir)
 		return nil, fmt.Errorf("layer: launch %s: %w", bin, err)
@@ -261,42 +222,23 @@ func newCDPSession(ctx context.Context, url, audioSink string, w, h int) (*cdpse
 		_ = s.cmd.Wait()
 		close(s.done)
 	}()
+	// Chrome is running: from here every failure tears it down.
+	defer func() {
+		if err != nil {
+			s.stop()
+		}
+	}()
 
-	wsURL, err := s.waitPageWS(ctx)
-	if err != nil {
-		s.stop()
+	if err := s.connect(ctx); err != nil {
 		return nil, err
 	}
-	conn, _, err := websocket.Dial(ctx, wsURL, nil)
-	if err != nil {
-		s.stop()
-		return nil, fmt.Errorf("layer: chrome websocket: %w", err)
+	// The target URL is loaded via CDP (headless=new rejects a URL argument
+	// + multiple targets).
+	if url == "" {
+		url = "about:blank"
 	}
-	conn.SetReadLimit(cdpWebSocketReadLimit)
-	s.ws = conn
-	go s.readLoop()
-
-	if _, err := s.call(ctx, "Page.enable", nil); err != nil {
-		s.stop()
-		return nil, fmt.Errorf("layer: CDP Page.enable: %w", err)
-	}
-	// Transparent page background: captureScreenshot then emits PNG with an
-	// alpha channel instead of a white backdrop, so the layer composites
-	// over the stream instead of covering it.
-	if _, err := s.call(ctx, "Emulation.setDefaultBackgroundColorOverride", map[string]any{
-		"color": map[string]any{"r": 0, "g": 0, "b": 0, "a": 0},
-	}); err != nil {
-		s.stop()
-		return nil, fmt.Errorf("layer: CDP transparent background: %w", err)
-	}
-	// Chrome was launched with no URL; point the page target at the real one.
-	if _, err := s.call(ctx, "Page.navigate", map[string]any{"url": target}); err != nil {
-		s.stop()
-		return nil, fmt.Errorf("layer: CDP navigate: %w", err)
-	}
-	if err := s.setViewport(w, h); err != nil {
-		s.stop()
-		return nil, fmt.Errorf("layer: CDP set viewport: %w", err)
+	if err := s.preparePage(ctx, url, w, h); err != nil {
+		return nil, err
 	}
 	// The page must have loaded before the first capture: a
 	// Page.startScreencast issued before the page paints streams zero
@@ -310,16 +252,151 @@ func newCDPSession(ctx context.Context, url, audioSink string, w, h int) (*cdpse
 	return s, nil
 }
 
-// stop kills Chrome and removes the profile directory.
+// newChromeHome creates the isolated HOME for one Chrome instance. Chrome's
+// ProcessSingleton keys off the real profile dir; without this, launching
+// collides with any other Chrome the user has open (SingletonLock: File
+// exists) and the headless process aborts. Pointing HOME/XDG at a throwaway
+// dir keeps the overlay's browser fully independent of the user's session.
+func newChromeHome() (string, error) {
+	userDir, err := os.MkdirTemp("", "ctrlirl-chrome-*")
+	if err != nil {
+		return "", err
+	}
+	for _, sub := range []string{chromeProfileDir, ".config", ".cache"} {
+		if err := os.MkdirAll(filepath.Join(userDir, sub), 0o755); err != nil {
+			os.RemoveAll(userDir)
+			return "", err
+		}
+	}
+	return userDir, nil
+}
+
+// chromeProfileDir is the profile directory inside a Chrome home.
+const chromeProfileDir = "ud"
+
+// chromeArgs is the command line of the layer's headless Chrome.
+func chromeArgs(userDir string, port int, audioSink string, w, h int) []string {
+	args := []string{
+		"--headless=new",
+		"--no-sandbox",
+	}
+	// Rendering backend (see renderBackendFlags). Hardware rendering keeps
+	// the page's requestAnimationFrame locked to the display refresh, which
+	// is what makes motion in the captured stream look smooth; SwiftShader
+	// is the fallback for machines without a usable GPU. The screencast
+	// capture path is unchanged (CDP Page.startScreencast reads compositor
+	// output regardless of the backend).
+	args = append(args, renderBackendFlags()...)
+	args = append(args,
+		"--hide-scrollbars",
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--disable-background-timer-throttling",
+		"--disable-renderer-backgrounding",
+		"--disable-backgrounding-occlusion",
+		"--autoplay-policy=no-user-gesture-required",
+		// Equals form is mandatory: the space form ("--window-size 1280,720")
+		// leaves "1280,720" as a positional URL argument, which headless=new
+		// rejects with "Multiple targets are not supported".
+		fmt.Sprintf("--window-size=%d,%d", w, h),
+		"--remote-debugging-port="+strconv.Itoa(port),
+		"--remote-debugging-address=127.0.0.1",
+		// --user-data-dir MUST use the equals form too. The space form is
+		// silently treated as a default dir and DevTools refuses to start.
+		"--user-data-dir="+filepath.Join(userDir, chromeProfileDir),
+	)
+	if audioSink != "" {
+		args = append(args, "--audio-sink", audioSink)
+	}
+	return args
+}
+
+// chromeEnv is Chrome's environment: the host's without proxy variables,
+// HOME/XDG pointed at the instance's own home, and the audio sink pin.
+func chromeEnv(userDir, audioSink string) []string {
+	env := append(filterProxyEnv(os.Environ()),
+		"HOME="+userDir,
+		"XDG_CONFIG_HOME="+filepath.Join(userDir, ".config"),
+		"XDG_CACHE_HOME="+filepath.Join(userDir, ".cache"),
+	)
+	// PULSE_SINK pins every stream this Chrome instance creates onto the
+	// layer's null sink at the process level (PulseAudio and PipeWire-Pulse
+	// both honor it), so audio arriving minutes later (a donation alert) is
+	// routed correctly without any pactl round trip. routeAudio remains as a
+	// fallback for the case where the env pin does not take.
+	if audioSink != "" {
+		env = append(env, "PULSE_SINK="+audioSink)
+	}
+	return env
+}
+
+// connect waits for Chrome's page target, opens its DevTools websocket and
+// starts the read loop.
+func (s *cdpsession) connect(ctx context.Context) error {
+	wsURL, err := s.waitPageWS(ctx)
+	if err != nil {
+		return err
+	}
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		return fmt.Errorf("layer: chrome websocket: %w", err)
+	}
+	conn.SetReadLimit(cdpWebSocketReadLimit)
+	s.ws = conn
+	go s.readLoop()
+	return nil
+}
+
+// preparePage makes the page ready to capture: events on, transparent
+// background, target loaded, layout viewport pinned.
+func (s *cdpsession) preparePage(ctx context.Context, url string, w, h int) error {
+	if _, err := s.call(ctx, "Page.enable", nil); err != nil {
+		return fmt.Errorf("layer: CDP Page.enable: %w", err)
+	}
+	// Transparent page background: frames then carry an alpha channel
+	// instead of a white backdrop, so the layer composites over the stream
+	// instead of covering it.
+	if _, err := s.call(ctx, "Emulation.setDefaultBackgroundColorOverride", map[string]any{
+		"color": map[string]any{"r": 0, "g": 0, "b": 0, "a": 0},
+	}); err != nil {
+		return fmt.Errorf("layer: CDP transparent background: %w", err)
+	}
+	if _, err := s.call(ctx, "Page.navigate", map[string]any{"url": url}); err != nil {
+		return fmt.Errorf("layer: CDP navigate: %w", err)
+	}
+	if err := s.setViewport(w, h); err != nil {
+		return fmt.Errorf("layer: CDP set viewport: %w", err)
+	}
+	return nil
+}
+
+// stop kills Chrome and removes its home directory.
+//
+// Chrome is a process tree (browser, zygotes, renderers, GPU, crashpad).
+// Killing only the browser process left the children to die on their own
+// while still writing into the profile, so the removal raced them and a
+// stray directory stayed behind in the temp dir for every session. The whole
+// process group is killed instead (Chrome runs in its own, see
+// newCDPSession), and the removal is retried briefly for the stragglers that
+// escaped the group.
 func (s *cdpsession) stop() {
 	if s.ws != nil {
 		_ = s.ws.Close(websocket.StatusNormalClosure, "")
 	}
 	if s.cmd != nil && s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
+		if err := syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			_ = s.cmd.Process.Kill()
+		}
 	}
 	<-s.done
-	os.RemoveAll(s.userDir)
+	for attempt := 0; attempt < 20; attempt++ {
+		os.RemoveAll(s.userDir)
+		if _, err := os.Stat(s.userDir); os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	slog.Warn("layer: chrome home not removed", "dir", s.userDir)
 }
 
 // Stopped reports Chrome exit.
@@ -339,10 +416,10 @@ func (s *cdpsession) setViewport(w, h int) error {
 }
 
 // SetStreamHandler installs the sink for Page.screencastFrame events.
-// The handler runs on the CDP read-loop goroutine and receives the base64
-// frame data plus the session id; the session acks the frame itself after
-// the handler returns, so the handler must not issue CDP calls.
-func (s *cdpsession) SetStreamHandler(fn func(data string, sessionId int64)) {
+// The handler runs on the CDP read-loop goroutine and receives the decoded
+// PNG frame, which it may keep; the session acks the frame itself after the
+// handler returns, so the handler must not issue CDP calls.
+func (s *cdpsession) SetStreamHandler(fn func(frame []byte)) {
 	s.strMu.Lock()
 	s.streamFn = fn
 	s.strMu.Unlock()
@@ -375,15 +452,10 @@ func (s *cdpsession) capture(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	b64, ok := res["data"].(string)
-	if !ok {
+	if len(res.Data) == 0 {
 		return nil, fmt.Errorf("layer: captureScreenshot returned no data")
 	}
-	frame, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil || len(frame) == 0 {
-		return nil, fmt.Errorf("layer: captureScreenshot returned no data")
-	}
-	return frame, nil
+	return res.Data, nil
 }
 
 // glRenderer reports the active WebGL rasterizer via a Runtime.evaluate probe
@@ -412,8 +484,7 @@ func (s *cdpsession) glRenderer(ctx context.Context) string {
 	if err != nil {
 		return "unknown: " + err.Error()
 	}
-	v, _ := res["result"].(map[string]any)
-	r, _ := v["value"].(string)
+	r, _ := res.Result.Value.(string)
 	if r == "" {
 		return "unknown"
 	}
@@ -421,35 +492,35 @@ func (s *cdpsession) glRenderer(ctx context.Context) string {
 }
 
 // call sends one CDP command and waits for its response.
-func (s *cdpsession) call(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
+func (s *cdpsession) call(ctx context.Context, method string, params map[string]any) (cdpResult, error) {
 	id, ch := s.nextCall()
 	defer s.dropCall(id)
 
 	payload, err := json.Marshal(map[string]any{"id": id, "method": method, "params": params})
 	if err != nil {
-		return nil, err
+		return cdpResult{}, err
 	}
 	if err := s.ws.Write(ctx, websocket.MessageText, payload); err != nil {
-		return nil, fmt.Errorf("layer: CDP %s: %w", method, err)
+		return cdpResult{}, fmt.Errorf("layer: CDP %s: %w", method, err)
 	}
 	select {
 	case r := <-ch:
 		if r.Error != nil {
-			return nil, fmt.Errorf("layer: CDP %s: %s", method, r.Error.Message)
+			return cdpResult{}, fmt.Errorf("layer: CDP %s: %s", method, r.Error.Message)
 		}
 		return r.Result, nil
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return cdpResult{}, ctx.Err()
 	case <-s.done:
-		return nil, fmt.Errorf("layer: chrome exited")
+		return cdpResult{}, fmt.Errorf("layer: chrome exited")
 	}
 }
 
-func (s *cdpsession) nextCall() (int, chan *cdpResponse) {
+func (s *cdpsession) nextCall() (int, chan *cdpMessage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nextID++
-	ch := make(chan *cdpResponse, 1)
+	ch := make(chan *cdpMessage, 1)
 	s.calls[s.nextID] = ch
 	return s.nextID, ch
 }
@@ -460,86 +531,154 @@ func (s *cdpsession) dropCall(id int) {
 	s.mu.Unlock()
 }
 
-// readLoop dispatches CDP responses to their waiters; page events are ignored.
+// readLoop reads DevTools messages until the socket closes, then fails every
+// pending call. One buffer is reused for all messages: dispatch consumes a
+// message completely (decoding copies what it keeps) before the next read.
 func (s *cdpsession) readLoop() {
+	var msg bytes.Buffer
 	for {
-		_, data, err := s.ws.Read(context.Background())
+		_, r, err := s.ws.Reader(context.Background())
+		if err == nil {
+			msg.Reset()
+			_, err = msg.ReadFrom(r)
+		}
 		if err != nil {
-			s.mu.Lock()
-			chans := s.calls
-			s.calls = make(map[int]chan *cdpResponse, 8)
-			s.mu.Unlock()
-			for _, ch := range chans {
-				select {
-				case ch <- &cdpResponse{Error: &cdpCError{Message: err.Error()}}:
-				default:
-				}
-			}
+			s.failPendingCalls(err)
 			return
 		}
-		var r cdpResponse
-		if json.Unmarshal(data, &r) != nil || r.ID == 0 {
-			s.streamEvent(data)
-			continue
-		}
-		s.mu.Lock()
-		if ch, ok := s.calls[r.ID]; ok {
-			ch <- &r
-		}
-		s.mu.Unlock()
+		s.dispatch(msg.Bytes())
 	}
 }
 
-// streamEvent handles CDP page events (id==0, no pending call):
-// Page.screencastFrame is passed to the installed handler and acked; the
-// main frame's Page.loadEventFired closes loadCh; everything else is
-// ignored. Runs on the read-loop goroutine.
-func (s *cdpsession) streamEvent(raw []byte) {
-	var e struct {
-		Method string `json:"method"`
-		Params struct {
-			Data      string `json:"data"`
-			SessionID int64  `json:"sessionId"`
-			FrameID   string `json:"frameId"`
-		} `json:"params"`
+// failPendingCalls answers every waiting call with err (the socket is gone).
+func (s *cdpsession) failPendingCalls(err error) {
+	s.mu.Lock()
+	pending := s.calls
+	s.calls = make(map[int]chan *cdpMessage, 8)
+	s.mu.Unlock()
+	for _, ch := range pending {
+		select {
+		case ch <- &cdpMessage{Error: &cdpCError{Message: err.Error()}}:
+		default:
+		}
 	}
-	if json.Unmarshal(raw, &e) != nil {
+}
+
+// dispatch routes one DevTools message: a response goes to its waiter, a
+// page event to handleEvent. Runs on the read-loop goroutine and must not
+// keep a reference to data.
+func (s *cdpsession) dispatch(data []byte) {
+	// Screencast frames are nearly all of the traffic and nearly all of
+	// its bytes; they take a shortcut around the JSON decoder.
+	if frame, sessionID, ok := screencastFrame(data); ok {
+		s.handleFrame(frame, sessionID)
 		return
 	}
-	switch e.Method {
-	case "Page.screencastFrame":
-		s.strMu.Lock()
-		fn := s.streamFn
-		s.strMu.Unlock()
-		if fn != nil {
-			fn(e.Params.Data, e.Params.SessionID)
+	var m cdpMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		if m.ID == 0 {
+			return // an event in a shape the session does not read
 		}
-		// Ack so Chrome keeps streaming (it stalls delivery once unacked
-		// frames pile up). Fire-and-forget write: a blocking s.call here
-		// deadlocks — this runs on the read loop, which is the only
-		// goroutine that can read the ack's response.
-		s.ackScreencast(e.Params.SessionID)
+		m.Error = &cdpCError{Message: "malformed response: " + err.Error()}
+	}
+	if m.ID == 0 {
+		s.handleEvent(&m)
+		return
+	}
+	s.mu.Lock()
+	if ch, ok := s.calls[m.ID]; ok {
+		ch <- &m
+	}
+	s.mu.Unlock()
+}
+
+// screencastPrefix is how Chrome starts every Page.screencastFrame message:
+// method first, then params with the frame as its first member.
+const screencastPrefix = `{"method":"Page.screencastFrame","params":{"data":"`
+
+// screencastFrame decodes a Page.screencastFrame message without running the
+// JSON decoder over the frame. encoding/json validates and scans every byte
+// of a message before decoding it, which costs several times the base64
+// decode itself on a megabyte string.
+//
+// It recognises exactly the layout Chrome emits (screencastPrefix), takes the
+// base64 run up to its closing quote, and JSON-decodes only the small
+// remainder of params. Anything else — another member order, an escape
+// inside the string, invalid base64, a malformed tail — reports !ok and the
+// caller falls back to the generic decoder, so this is an optimisation only:
+// it never decides what a message means.
+func screencastFrame(msg []byte) (frame []byte, sessionID int64, ok bool) {
+	if !bytes.HasPrefix(msg, []byte(screencastPrefix)) {
+		return nil, 0, false
+	}
+	b64 := msg[len(screencastPrefix):]
+	end := bytes.IndexByte(b64, '"')
+	if end < 0 {
+		return nil, 0, false
+	}
+	// tail is what follows the frame: `,"metadata":{…},"sessionId":7}}`.
+	// Without the message's final brace and behind a stand-in for the
+	// frame, it is the params object on its own.
+	b64, tail := b64[:end], b64[end+1:]
+	if len(tail) < 2 || tail[len(tail)-1] != '}' {
+		return nil, 0, false
+	}
+	var params struct {
+		SessionID int64 `json:"sessionId"`
+	}
+	rest := make([]byte, 0, len(tail)+len(`{"data":""`))
+	rest = append(append(rest, `{"data":""`...), tail[:len(tail)-1]...)
+	if json.Unmarshal(rest, &params) != nil {
+		return nil, 0, false
+	}
+	frame = make([]byte, base64.StdEncoding.DecodedLen(len(b64)))
+	n, err := base64.StdEncoding.Decode(frame, b64)
+	if err != nil {
+		return nil, 0, false
+	}
+	return frame[:n], params.SessionID, true
+}
+
+// handleEvent handles a page event: a screencast frame (generic decode
+// path), or the main frame's Page.loadEventFired, which closes loadCh.
+// Everything else is ignored.
+func (s *cdpsession) handleEvent(m *cdpMessage) {
+	switch m.Method {
+	case "Page.screencastFrame":
+		s.handleFrame(m.Params.Data, m.Params.SessionID)
 	case "Page.loadEventFired":
-		if e.Params.FrameID == "" { // main frame only
+		if m.Params.FrameID == "" { // main frame only
 			s.loadOnce.Do(func() { close(s.loadCh) })
 		}
 	}
 }
 
-// ackScreencast writes a screencast frame ack without waiting for the
-// response. The response (an id with no pending call) is dropped by the
-// read loop. Must not block: it runs on the read-loop goroutine.
-func (s *cdpsession) ackScreencast(sessionID int64) {
-	id := s.nextIDOnly()
-	payload, err := json.Marshal(map[string]any{
-		"id":     id,
-		"method": "Page.screencastFrameAck",
-		"params": map[string]any{"sessionId": sessionID},
-	})
-	if err != nil {
-		return
+// handleFrame passes a screencast frame to the installed handler and acks
+// it so Chrome keeps streaming (it stalls delivery once unacked frames pile
+// up).
+func (s *cdpsession) handleFrame(frame []byte, sessionID int64) {
+	s.strMu.Lock()
+	fn := s.streamFn
+	s.strMu.Unlock()
+	if fn != nil {
+		if len(frame) == 0 {
+			slog.Debug("layer: empty screencast frame")
+		} else {
+			fn(frame)
+		}
 	}
-	_ = s.ws.Write(context.Background(), websocket.MessageText, payload)
+	s.ackScreencast(sessionID)
+}
+
+// ackScreencast writes a screencast frame ack without waiting for the
+// response (an id with no pending call, dropped by dispatch). It must not
+// block on a reply: it runs on the read-loop goroutine, the only one that
+// could read it — a blocking s.call here deadlocks.
+func (s *cdpsession) ackScreencast(sessionID int64) {
+	s.ackBuf = fmt.Appendf(s.ackBuf[:0],
+		`{"id":%d,"method":"Page.screencastFrameAck","params":{"sessionId":%d}}`,
+		s.nextIDOnly(), sessionID)
+	_ = s.ws.Write(context.Background(), websocket.MessageText, s.ackBuf)
 }
 
 // nextIDOnly reserves a CDP command id without registering a waiter.

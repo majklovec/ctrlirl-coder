@@ -1,26 +1,23 @@
-// Package rpc is the runtime remote control: a JSON-RPC 2.0 server on a Unix
-// socket (wire format in RPC.md) that edits the running scene — layers,
-// filters, named scenes — by mutating the scene descriptor and pushing the
-// diff through the scene.Applier (the compositor, which serializes the
-// pipeline mutations).
-//
-// The controller owns the authoritative copy of the running scene, so scene
-// file reloads (SIGHUP) and socket requests converge on one state machine.
-// It is pure Go: the applier is an interface, tests use a fake.
 package rpc
 
 import (
+	"cmp"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
-	"sort"
+	"maps"
+	"slices"
 	"sync"
 
 	"ctrlirl-coder/internal/scene"
 )
 
-// Controller is the scene state machine behind the JSON-RPC methods.
+// Controller is the scene state machine behind the JSON-RPC methods. It owns
+// the authoritative copy of the running scene, so scene file reloads (SIGHUP)
+// and RPC requests converge on one place: every edit mutates a copy of the
+// scene descriptor and pushes the diff through the scene.Applier (the
+// compositor, which serializes the pipeline mutations). Pure Go: the applier
+// is an interface, tests use a fake.
 type Controller struct {
 	mu     sync.Mutex
 	ap     scene.Applier
@@ -51,18 +48,16 @@ func New(ap scene.Applier, initial *scene.Scene, logger *slog.Logger) *Controlle
 func (c *Controller) Current() *scene.Scene {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return cloneScene(c.cur)
+	return c.cur.Clone()
 }
 
 // SceneNames lists the named (switchable) scenes, sorted.
 func (c *Controller) SceneNames() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	names := make([]string, 0, len(c.scenes))
-	for n := range c.scenes {
-		names = append(names, n)
-	}
-	sort.Strings(names)
+	// Never nil: the list is serialized, and clients expect [] for "none".
+	names := slices.AppendSeq(make([]string, 0, len(c.scenes)), maps.Keys(c.scenes))
+	slices.Sort(names)
 	return names
 }
 
@@ -74,7 +69,7 @@ func (c *Controller) Scene(name string) (*scene.Scene, bool) {
 	if !ok {
 		return nil, false
 	}
-	return cloneScene(s), true
+	return s.Clone(), true
 }
 
 // Register stores a parsed scene under name for later scene.switch, without
@@ -82,7 +77,7 @@ func (c *Controller) Scene(name string) (*scene.Scene, bool) {
 func (c *Controller) Register(name string, s *scene.Scene) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.scenes[c.resolveName(name, s)] = cloneScene(s)
+	c.scenes[c.resolveName(name, s)] = s.Clone()
 }
 
 // resolveName picks the name a scene is stored under: the argument, falling
@@ -113,7 +108,7 @@ func (c *Controller) Load(ctx context.Context, name string, s *scene.Scene) ([]s
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	name = c.resolveName(name, s)
-	c.scenes[name] = cloneScene(s)
+	c.scenes[name] = s.Clone()
 	ops, err := c.replaceLocked(ctx, s)
 	if err != nil {
 		delete(c.scenes, name)
@@ -131,7 +126,7 @@ func (c *Controller) Switch(ctx context.Context, name string) (*scene.Scene, []s
 	if !ok {
 		return nil, nil, fmt.Errorf("rpc: no scene named %q (load it first)", name)
 	}
-	s = cloneScene(s)
+	s = s.Clone()
 	ops, err := c.Replace(ctx, s)
 	if err != nil {
 		return nil, ops, fmt.Errorf("rpc: switch to %q: %w", name, err)
@@ -141,7 +136,7 @@ func (c *Controller) Switch(ctx context.Context, name string) (*scene.Scene, []s
 }
 
 // modify runs tx against a clone of the running scene, re-validates the
-// result through the full scene parser (zorder normalization, id/type/filter
+// result exactly as a parsed scene is (zorder normalization, id/type/filter
 // checks), and pushes the diff to the applier with rollback-on-failure. It
 // returns the applied ops and the new scene.
 func (c *Controller) modify(ctx context.Context, describe string, tx func(*scene.Scene) error) ([]scene.Op, *scene.Scene, error) {
@@ -152,25 +147,20 @@ func (c *Controller) modify(ctx context.Context, describe string, tx func(*scene
 	// first layer's alpha, hiding the just-shown scene).
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	nx := cloneScene(c.cur)
+	nx := c.cur.Clone()
 	if err := tx(nx); err != nil {
 		return nil, nil, err
 	}
-	data, err := json.Marshal(nx)
-	if err != nil {
+	if err := nx.Finalize(); err != nil {
 		return nil, nil, err
 	}
-	parsed, err := scene.Parse(data)
-	if err != nil {
-		return nil, nil, err
-	}
-	ops, err := c.replaceLocked(ctx, parsed)
+	ops, err := c.replaceLocked(ctx, nx)
 	if err != nil {
 		c.logger.Error("rpc: apply failed, rolled back", "op", describe, "err", err)
 		return ops, nil, fmt.Errorf("rpc: %s: %w", describe, err)
 	}
 	c.logger.Info("rpc: applied", "op", describe, "ops", len(ops))
-	return ops, parsed, nil
+	return ops, nx, nil
 }
 
 // replaceLocked is Replace without the lock (callers hold it). Ops are
@@ -185,12 +175,11 @@ func (c *Controller) replaceLocked(ctx context.Context, nx *scene.Scene) ([]scen
 	// One freeze/thaw around the whole batch, not per RemoveLayer — per-op
 	// state cycles make a multi-layer switch stall the stream seconds
 	// (each READY→PLAYING re-prerolls compositor + encoder + mux).
-	if len(ops) > 1 {
-		if b, ok := c.ap.(scene.Batcher); ok {
-			_ = b.SuspendStream(ctx)
-			defer func() { _ = b.ResumeStream(ctx) }()
-		}
+	resume, err := scene.Suspend(ctx, c.ap, ops)
+	if err != nil {
+		return nil, err // nothing applied yet
 	}
+	defer resume()
 	old := c.cur
 	for i, op := range ops {
 		if err := scene.ApplyOp(ctx, c.ap, op); err != nil {
@@ -232,7 +221,7 @@ func (c *Controller) rollbackLocked(ctx context.Context, old *scene.Scene, done 
 	}
 	// z-order safety, stable within a kind: removes first, then updates,
 	// then adds.
-	sort.SliceStable(rb, func(i, j int) bool { return rollbackRank(rb[i]) < rollbackRank(rb[j]) })
+	slices.SortStableFunc(rb, func(a, b scene.Op) int { return cmp.Compare(rollbackRank(a), rollbackRank(b)) })
 	c.cur = old
 	if len(rb) > 0 {
 		if err := scene.ApplyDiff(ctx, c.ap, rb); err != nil {
@@ -241,7 +230,7 @@ func (c *Controller) rollbackLocked(ctx context.Context, old *scene.Scene, done 
 	}
 }
 
-// Layer returns a pointer to the layer with id in s.
+// findLayer returns a pointer to the layer with id in s, nil when absent.
 func findLayer(s *scene.Scene, id string) *scene.Layer {
 	for i := range s.Layers {
 		if s.Layers[i].ID == id {
@@ -261,10 +250,4 @@ func rollbackRank(op scene.Op) int {
 	default:
 		return 2
 	}
-}
-
-// cloneScene deep-copies the scene (no JSON round-trip; scene.Clone
-// preserves nil-vs-empty maps).
-func cloneScene(s *scene.Scene) *scene.Scene {
-	return s.Clone()
 }

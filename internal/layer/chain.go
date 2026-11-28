@@ -56,72 +56,61 @@ func (c *Chain) SrcPad() gst.Pad {
 // AFTER every element has been added to a bin: GStreamer 1.28's
 // gst_bin_add breaks pad links made before insertion, so pre-linking a
 // chain (before Add) silently unlinks the first hop.
+//
+// A chain fed by a runtime-pad source is linked in two static runs — up to
+// the source, and from the element behind it — and the gap is closed when
+// the source adds its pad.
 func (c *Chain) LinkChain() error {
-	if c.SharedSource != nil {
+	var (
+		source    gst.Element // runtime-pad source feeding Elements[tailStart]
+		tailStart int
+	)
+	switch {
+	case c.SharedSource != nil:
 		// The shared source already sits in the bin (owned by the sibling
 		// video chain); only the static tail is ours to link.
 		if len(c.Elements) < 2 {
 			return fmt.Errorf("layer: shared-source chain %s needs a source and a tail",
 				c.Elements[0].GetName())
 		}
-		if err := c.linkRange(0, len(c.Elements)); err != nil {
+		source = c.SharedSource
+	case c.DynamicSourceIndex >= 0:
+		source, tailStart = c.Elements[c.DynamicSourceIndex], c.DynamicSourceIndex+1
+		if tailStart >= len(c.Elements) {
+			return fmt.Errorf("layer: dynamic source %s has no tail elements", source.GetName())
+		}
+		if err := c.linkRange(0, tailStart); err != nil {
 			return err
 		}
-		var linked sync.Once
-		sink := c.Elements[0].GetStaticPad("sink")
-		if sink == nil {
-			return fmt.Errorf("layer: shared-source tail %s has no sink pad", c.Elements[0].GetName())
-		}
-		linkPad := func(p gst.Pad) {
-			linked.Do(func() {
-				if r := p.Link(sink); r != gst.PadLinkOK {
-					slog.Error("layer: shared source pad link failed",
-						"source", c.SharedSource.GetName(), "pad", p.GetName(), "result", r.String())
-				}
-			})
-		}
-		// Runtime sources (decodebin and friends) add their pads during
-		// preroll — after the video and audio chains of a layer have both
-		// linked (the AddLayer command runs LinkChain on each before the
-		// state change), so the pad-added handler always sees the pad.
-		c.SharedSource.ConnectPadAdded(func(_ gst.Element, p gst.Pad) {
-			if padIsKind(p, mediaTypeFor(c.DynamicPadAudio)) {
-				linkPad(p)
-			}
-		})
-		return nil
-	}
-	if c.DynamicSourceIndex < 0 {
+	default:
 		return c.linkRange(0, len(c.Elements))
-	}
-	tailStart := c.DynamicSourceIndex + 1
-	if tailStart >= len(c.Elements) {
-		return fmt.Errorf("layer: dynamic source %s has no tail elements", c.Elements[c.DynamicSourceIndex].GetName())
-	}
-	if err := c.linkRange(0, tailStart); err != nil {
-		return err
 	}
 	if err := c.linkRange(tailStart, len(c.Elements)); err != nil {
 		return err
 	}
+	return c.linkDynamicPad(source, c.Elements[tailStart])
+}
 
-	dyn := c.Elements[c.DynamicSourceIndex]
+// linkDynamicPad links the first pad of the chain's media kind that source
+// adds at runtime to tail's sink pad. Runtime sources (decodebin and
+// friends) add their pads during preroll — after the video and audio chains
+// of a layer have both been linked (AddLayer runs LinkChain on each before
+// the state change), so the handler always sees the pad.
+func (c *Chain) linkDynamicPad(source, tail gst.Element) error {
+	sink := tail.GetStaticPad("sink")
+	if sink == nil {
+		return fmt.Errorf("layer: %s has no sink pad for the dynamic source %s", tail.GetName(), source.GetName())
+	}
+	kind := mediaTypeFor(c.DynamicPadAudio)
 	var linked sync.Once
-	dyn.ConnectPadAdded(func(_ gst.Element, srcPad gst.Pad) {
-		if !padIsKind(srcPad, mediaTypeFor(c.DynamicPadAudio)) {
+	source.ConnectPadAdded(func(_ gst.Element, pad gst.Pad) {
+		if !padIsKind(pad, kind) {
 			return
 		}
 		linked.Do(func() {
-			sink := c.Elements[tailStart].GetStaticPad("sink")
-			if sink == nil {
-				slog.Error("layer: dynamic source tail has no sink pad", "source", dyn.GetName())
-				return
-			}
-			if r := srcPad.Link(sink); r != gst.PadLinkOK {
+			if r := pad.Link(sink); r != gst.PadLinkOK {
 				slog.Error("layer: dynamic pad link failed",
-					"source", dyn.GetName(),
-					"pad", srcPad.GetName(),
-					"result", r.String())
+					"source", source.GetName(), "pad", pad.GetName(), "result", r.String())
 			}
 		})
 	})

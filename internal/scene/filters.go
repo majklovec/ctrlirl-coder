@@ -2,15 +2,16 @@ package scene
 
 import (
 	"fmt"
+	"maps"
 	"math"
 )
 
 // FilterSpec is one media filter attached to a scene layer. Filters are
 // inserted into the layer's element chain in scene order (video filters
 // before the videoconvert/capsfilter tail, audio filters inside the layer's
-// audio chain). A filter change forces a chain rebuild (remove + add op in
-// the scene diff) — the compositor cannot splice elements into a
-// running chain.
+// audio chain). A change to the list's shape forces a chain rebuild (remove +
+// add op in the scene diff) — the compositor cannot splice elements into a
+// running chain; a param-only change may be applied in place (diffLayers).
 type FilterSpec struct {
 	Kind   string         `json:"kind"`
 	Params map[string]any `json:"params,omitempty"`
@@ -80,6 +81,12 @@ type FilterDef struct {
 	Check func(Params map[string]any) error
 }
 
+// edgeParams are the per-edge pixel counts of videocrop and videobox.
+var edgeParams = map[string]FilterParamDef{
+	"top": {Kind: ParamInt, Default: 0.0}, "bottom": {Kind: ParamInt, Default: 0.0},
+	"left": {Kind: ParamInt, Default: 0.0}, "right": {Kind: ParamInt, Default: 0.0},
+}
+
 // filterRegistry is the supported filter set (see FILTERS.md).
 var filterRegistry = map[string]FilterDef{
 	// --- video filters -------------------------------------------------
@@ -101,10 +108,7 @@ var filterRegistry = map[string]FilterDef{
 	},
 	"videocrop": {
 		Kind: "videocrop", Format: FormatVideo, Factory: "videocrop",
-		Params: map[string]FilterParamDef{
-			"top": {Kind: ParamInt, Default: 0.0}, "bottom": {Kind: ParamInt, Default: 0.0},
-			"left": {Kind: ParamInt, Default: 0.0}, "right": {Kind: ParamInt, Default: 0.0},
-		},
+		Params: edgeParams,
 	},
 	"videobalance": {
 		Kind: "videobalance", Format: FormatVideo, Factory: "videobalance",
@@ -130,10 +134,7 @@ var filterRegistry = map[string]FilterDef{
 	},
 	"videobox": {
 		Kind: "videobox", Format: FormatVideo, Factory: "videobox",
-		Params: map[string]FilterParamDef{
-			"top": {Kind: ParamInt, Default: 0.0}, "bottom": {Kind: ParamInt, Default: 0.0},
-			"left": {Kind: ParamInt, Default: 0.0}, "right": {Kind: ParamInt, Default: 0.0},
-		},
+		Params: edgeParams,
 	},
 	"videoflip": {
 		Kind: "videoflip", Format: FormatVideo, Factory: "videoflip",
@@ -167,9 +168,7 @@ var filterRegistry = map[string]FilterDef{
 		},
 		TransformParams: func(p map[string]any) map[string]any {
 			out := make(map[string]any, len(p))
-			for k, v := range p {
-				out[k] = v
-			}
+			maps.Copy(out, p)
 			out["angle"] = effFloat(p, "angle") * math.Pi / 180.0
 			return out
 		},
@@ -338,46 +337,48 @@ func (d FilterDef) FactoryFor(eff map[string]any) (string, error) {
 // known params of the right type, and the per-kind cross-param checks.
 func validateFilters(l Layer) error {
 	for j, f := range l.Filters {
-		def, ok := filterRegistry[f.Kind]
-		if !ok {
-			return fmt.Errorf("scene: layer %q filter %d: unknown kind %q", l.ID, j, f.Kind)
+		if err := validateFilter(l, j, f); err != nil {
+			return err
 		}
-		if def.Format == FormatAudio && l.Type != LayerTypeBrowser {
-			return fmt.Errorf("scene: layer %q filter %d: %q is an audio filter; only browser layers carry audio", l.ID, j, f.Kind)
-		}
+	}
+	return nil
+}
 
-		// Per-param name + type checks (scene values over registry names).
-		valid := map[string]bool{}
-		for k, pd := range def.Params {
-			if err := checkParamType(l.ID, j, f.Kind, k, pd.Kind, f.Params[k]); err == nil {
-				valid[k] = true
-			}
-		}
-		// Effective values (defaults applied) are computed once: the
-		// equalizer resolves its band names from them, and the per-kind
-		// Check validates on them.
-		eff := def.EffectiveParams(f.Params)
-		if def.ExtraParams != nil {
-			for _, g := range def.ExtraParams(eff) {
-				if _, set := f.Params[g]; set {
-					if err := checkParamType(l.ID, j, f.Kind, g, ParamFloat, f.Params[g]); err != nil {
-						return err
-					}
-					valid[g] = true
-				}
-			}
-		}
-		for k := range f.Params {
-			if !valid[k] {
-				return fmt.Errorf("scene: layer %q filter %d (%s): unknown param %q", l.ID, j, f.Kind, k)
-			}
-		}
+func validateFilter(l Layer, j int, f FilterSpec) error {
+	def, ok := filterRegistry[f.Kind]
+	if !ok {
+		return fmt.Errorf("scene: layer %q filter %d: unknown kind %q", l.ID, j, f.Kind)
+	}
+	if def.Format == FormatAudio && l.Type != LayerTypeBrowser {
+		return fmt.Errorf("scene: layer %q filter %d: %q is an audio filter; only browser layers carry audio", l.ID, j, f.Kind)
+	}
 
-		// Cross-param check on the effective values (defaults applied).
-		if def.Check != nil {
-			if err := def.Check(eff); err != nil {
-				return fmt.Errorf("scene: layer %q filter %d: %w", l.ID, j, err)
-			}
+	// The accepted names: the registry's, plus the ones derived from the
+	// effective values (the equalizer's band gains, all numbers).
+	eff := def.EffectiveParams(f.Params)
+	kinds := make(map[string]FilterParamKind, len(def.Params))
+	for k, pd := range def.Params {
+		kinds[k] = pd.Kind
+	}
+	if def.ExtraParams != nil {
+		for _, k := range def.ExtraParams(eff) {
+			kinds[k] = ParamFloat
+		}
+	}
+	for k, v := range f.Params {
+		kind, known := kinds[k]
+		if !known {
+			return fmt.Errorf("scene: layer %q filter %d (%s): unknown param %q", l.ID, j, f.Kind, k)
+		}
+		if err := checkParamType(l.ID, j, f.Kind, k, kind, v); err != nil {
+			return err
+		}
+	}
+
+	// Cross-param check on the effective values (defaults applied).
+	if def.Check != nil {
+		if err := def.Check(eff); err != nil {
+			return fmt.Errorf("scene: layer %q filter %d: %w", l.ID, j, err)
 		}
 	}
 	return nil
@@ -413,36 +414,4 @@ func checkParamType(id string, j int, kind, key string, pd FilterParamKind, v an
 
 func paramTypeErr(id string, j int, kind, key, want string, got any) error {
 	return fmt.Errorf("scene: layer %q filter %d (%s) param %q: expected %s, got %T", id, j, kind, key, want, got)
-}
-
-// FiltersChanged reports whether two layers' filter lists differ (order and
-// params), which forces a chain rebuild in the scene diff.
-func FiltersChanged(a, b Layer) bool {
-	if len(a.Filters) != len(b.Filters) {
-		return true
-	}
-	for i := range a.Filters {
-		if a.Filters[i].Kind != b.Filters[i].Kind {
-			return true
-		}
-		if !paramsEqual(a.Filters[i].Params, b.Filters[i].Params) {
-			return true
-		}
-	}
-	return false
-}
-
-// paramsEqual compares two JSON-decoded param maps (float64/string/bool only,
-// per the registry type checks).
-func paramsEqual(a, b map[string]any) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, va := range a {
-		vb, ok := b[k]
-		if !ok || va != vb {
-			return false
-		}
-	}
-	return true
 }

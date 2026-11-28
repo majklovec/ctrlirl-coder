@@ -1,8 +1,10 @@
-// Package gstpull drains the pipeline's terminal `appsink` and hands each
-// encoded buffer to a Go send callback. This is the faithful Go port of the
-// original ctrlirl_coder/belacoder appsink data path: a dedicated goroutine calls
-// `gst_app_sink_pull_sample` (blocking pull), maps the buffer, and sends the
-// bytes over SRT — replacing the C main-loop callback `new_buf_cb`.
+// Package gstpull drains the pipeline's terminal `appsink` and hands the
+// encoded bytes to a Go send callback. This is the Go port of the original
+// ctrlirl_coder/belacoder appsink data path: a dedicated goroutine pulls with
+// `gst_app_sink_pull_sample` and sends the bytes over SRT — replacing the C
+// main-loop callback `new_buf_cb`. The terminal mpegtsmux emits one 188-byte
+// TS packet per buffer (thousands per second), so the drain collects a whole
+// batch of them per cgo call (see Run).
 //
 // Why the pull model: `gst_app_sink_pull_sample` is an application-thread API
 // designed to be called from the app, so all of it runs on an ordinary Go
@@ -25,9 +27,9 @@ package gstpull
 
 import (
 	"context"
+	"runtime"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"ctrlirl-coder/internal/gstutil"
 
@@ -46,20 +48,18 @@ var startup = time.Now()
 // well inside a typical supervisor window.
 const DefaultStallMS = 3000
 
-// Send is the callback the data path calls for each pulled buffer or batch.
-// Return an error (e.g. srt.ErrNotConnected) to drop the buffer and keep
-// draining.
+// Send is the callback the data path calls for each drained batch: whole
+// buffers, in order (a run of TS packets; a buffer larger than the batch
+// size arrives alone). Return an error (e.g. srt.ErrNotConnected) to drop
+// the batch and keep draining.
 //
-// b is either a view of a single mapped GstBuffer (legacy) or a batch of
-// multiple TS packets accumulated into a Go slice (batched send path). In
-// both cases the callee must copy the payload synchronously (srtgo's Write
-// does — srt_sendmsg2 copies into the SRT send buffer inside the C call) and
-// must never retain b after returning.
+// b is reused for the next batch: the callee must consume it synchronously
+// (the SRT send does — srt_sendmsg2 copies into the SRT send buffer inside
+// the C call) and must never retain it after returning.
 type Send func(b []byte) (int, error)
 
 // Puller drives the pull→send data path on one terminal appsink element.
-// The element must stay alive for the lifetime of the Puller (the pipeline
-// owns it); Detach is a no-op safety seam kept for the ordered teardown.
+// The pipeline owns the element; the Puller holds a reference until Detach.
 type Puller struct {
 	el gst.Element
 
@@ -73,7 +73,7 @@ type Puller struct {
 	frames     atomic.Uint64 // cumulative pulled buffers
 	bytesTotal atomic.Uint64 // cumulative pulled bytes
 	sent       atomic.Uint64 // cumulative successfully-sent bytes
-	dropped    atomic.Uint64 // buffers dropped: send failure
+	dropped    atomic.Uint64 // batches dropped: send failure
 
 	// Throughput: the window state (winStartMS/winBytes) is plain state
 	// owned by the Run goroutine; only the published rate is atomic.
@@ -94,7 +94,7 @@ type Puller struct {
 
 // SetPaceRateSupplier wires the drain pacer to a live target-bitrate source
 // (bit/s). Pass nil to disable pacing. Thread-safe; may be called after Run
-// has started (the Run loop loads the pointer per buffer).
+// has started (the Run loop loads the pointer per batch).
 func (p *Puller) SetPaceRateSupplier(fn func() int64) {
 	if fn == nil {
 		p.paceRate.Store(nil)
@@ -105,7 +105,7 @@ func (p *Puller) SetPaceRateSupplier(fn func() int64) {
 
 // framerateTriesMax bounds the caps-framerate probes: a mpegts terminal
 // (the normal case) reports no framerate fraction, so the probe would
-// repeat on every buffer for the whole stream. Try a few buffers (caps are
+// repeat on every batch for the whole stream. Try a few batches (caps are
 // negotiated early), then give up.
 const framerateTriesMax = 10
 
@@ -121,30 +121,34 @@ func Attach(el gst.Element, stallMS uint64) *Puller {
 	return p
 }
 
-// sinkPointer borrows the raw C sink pointer once. Run snapshots it at
-// start, so the hot loop reads a local and Detach (p.el = nil) no longer
-// races it.
-func (p *Puller) sinkPointer() unsafe.Pointer {
-	el := p.el
-	if el == nil {
-		return nil
-	}
-	return gstutil.Ptr(el)
-}
+// srtBatchSize is the most payload one send carries: 25 full SRT live
+// packets (1316 bytes = 7 TS packets each) ≈ 44 ms of a 6 Mbit/s stream. The
+// send path (sinks/srt) splits a batch into 1316-byte packets inside a single
+// cgo crossing, so a full batch costs one send call however many packets it
+// holds, and a batch lost to a dead link only costs tens of ms of content.
+const srtBatchSize = 25 * 1316
 
-// srtBatchSize is how many pulled TS bytes are accumulated before one SRT
-// send. The send path (sinks/srt) splits a batch into SRT live-safe 1316-byte
-// packets inside a single cgo crossing, so a large batch costs ONE send cgo
-// call regardless of how many packets it holds. 32 KB ≈ 174 packets ≈ ~44 ms of
-// 6 Mbps content — plenty big to make the send cgo cost negligible while the
-// added buffering stays far below the SRT latency, and a dropped/dead batch
-// only shaves tens of ms of content on reconnect.
-const srtBatchSize = 32 * 1024
+// A batch is shipped as soon as the appsink runs dry, not only when it is
+// full: holding bytes back until 32 kB have accumulated delayed a 500 kbit/s
+// stream by half a second (and stamped half a second of content with one SRT
+// send time).
+//
+// drainLinger is how long the appsink must stay empty before the batch goes
+// out. The muxer hands over each video frame as a quick burst of 188-byte
+// buffers; the linger keeps the drain from outrunning that burst and
+// shipping it as a stream of undersized SRT packets.
+//
+// drainMaxHold bounds how long the first buffer of a batch can wait when
+// buffers keep trickling in faster than the linger.
+const (
+	drainLinger  = 2 * time.Millisecond
+	drainMaxHold = 20 * time.Millisecond
+)
 
 // paceSleepQuantumMS bounds how often the pacer actually sleeps: sub-millisecond
 // debt is accumulated and only converted into a sleep once it reaches this
-// quantum (a mpegts terminal streams ~20 kpackets/s at 6 Mbps; a sleep
-// syscall per packet would be pure overhead).
+// quantum, so a run of small batches does not turn into a run of tiny
+// sleeps.
 const paceSleepQuantumMS int64 = 1
 
 // paceReanchorMS re-anchors the pacer when the drain falls this far behind
@@ -220,65 +224,66 @@ func (pc *pacer) tick(now int64, n uint64, rateBps int64) time.Duration {
 	return 0
 }
 
-// Run pulls buffers and sends each one via send until ctx is cancelled and
-// the pipeline is frozen (a frozen appsink makes the pull return NULL).
+// Run drains the appsink into send until the pipeline reaches EOS or NULL,
+// or ctx is cancelled (checked between batches; a drain blocked on an idle
+// appsink returns once the pipeline is stopped).
 //
-// Per buffer: 2 cgo calls (pull+map, unmap+unref). The SRT send is batched:
-// pulled TS packets accumulate into a srtBatchSize-byte slice and are shipped
-// in a single cgo send that internally chunks to SRT 1316-byte packets. The
-// drain is paced to 1× wall clock from the drained byte rate (pacer) — a
-// no-op for self-pacing live sources, the real-time clamp for VOD sources.
+// One cgo call per batch: the C drain blocks for the first buffer, then
+// collects what follows (see drainLinger / drainMaxHold) into a reused Go
+// buffer — no per-buffer crossing, no allocation. The drain is paced to 1×
+// wall clock from the drained byte rate (pacer) — a no-op for self-pacing
+// live sources, the real-time clamp for VOD sources.
 func (p *Puller) Run(ctx context.Context, send Send) {
-	sink := p.sinkPointer() // local snapshot; Detach cannot race the loop
-	if sink == nil {
+	el := p.el
+	if el == nil {
 		return
 	}
+	// The loop works on the element's raw pointer: keep the Go reference
+	// (and with it the element) alive until the loop is done, whatever
+	// Detach does meanwhile.
+	defer runtime.KeepAlive(el)
+	d := newDrainer(gstutil.Ptr(el))
+	defer d.close()
+
 	var (
-		winStart int64 = int64(nowMS())
+		buf      = make([]byte, srtBatchSize)
+		winStart = int64(nowMS())
 		winBytes uint64
 		frTries  int
 		pace     pacer
 	)
-	batch := make([]byte, 0, srtBatchSize)
-	for {
-		select {
-		case <-ctx.Done():
-			if len(batch) > 0 {
-				send(batch) // flush partial batch on shutdown
-			}
-			return
-		default:
+	for ctx.Err() == nil {
+		b := d.drain(buf, drainLinger, drainMaxHold)
+		if b.eos {
+			return // EOS, or the pipeline was stopped
 		}
-		f := pullMappedFrame(sink)
-		if f.handle == 0 {
-			if len(batch) > 0 {
-				send(batch) // flush partial batch on EOS
-			}
-			return // pipeline left PLAYING (frozen / EOS)
-		}
-		b := f.bytes()
-		if f.handle < 0 || b == nil {
-			f.release() // map failure / empty buffer: skip
+		if b.need > 0 {
+			// One buffer larger than the batch (a raw-video terminal):
+			// make room for it; it is still parked in the drainer.
+			buf = make([]byte, b.need)
 			continue
 		}
 
-		// Liveness + stats hot path: a few relaxed atomic stores per frame.
 		now := int64(nowMS())
-		size := uint64(len(b))
+		size := uint64(b.bytes)
 		if rateFn := p.paceRate.Load(); rateFn != nil {
-			if d := pace.tick(now, size, (*rateFn)()); d > 0 {
+			if sleep := pace.tick(now, size, (*rateFn)()); sleep > 0 {
 				// 1× wall clock at the target bitrate: VOD HLS/file sources
 				// would otherwise drain at network speed and hit EOS while
 				// the SRT listener is still on the first minute. Live
 				// sources never produce positive drift → no sleep.
-				time.Sleep(d)
+				time.Sleep(sleep)
 				now = int64(nowMS())
 			}
 		}
-		p.frames.Add(1)
+
+		// Liveness + stats: a few relaxed atomic stores per batch.
+		p.frames.Add(uint64(b.buffers))
 		p.bytesTotal.Add(size)
 		p.lastFrame.Store(now)
-		p.lastPTS.Store(f.pts)
+		if b.hasPTS {
+			p.lastPTS.Store(b.pts)
+		}
 		winBytes += size
 		if now-winStart >= 500 {
 			p.throughputKB.Store(winBytes * 8 / uint64(now-winStart)) // rolling ~500 ms window
@@ -286,25 +291,17 @@ func (p *Puller) Run(ctx context.Context, send Send) {
 			winStart = now
 		}
 		if p.frNum.Load() == 0 && frTries < framerateTriesMax {
-			// Caps are negotiated by the first buffers; probe the framerate a
-			// bounded number of times (a mpegts terminal reports none).
 			frTries++
-			num, den := framerate(p.el)
+			num, den := framerate(el)
 			p.frNum.Store(int32(num))
 			p.frDen.Store(int32(den))
 		}
 
-		// Accumulate into the batch; flush when full.
-		batch = append(batch, b...)
-		if len(batch) >= srtBatchSize {
-			if _, err := send(batch); err != nil {
-				p.dropped.Add(1) // one dropped batch (~174 TS packets)
-			} else {
-				p.sent.Add(uint64(len(batch)))
-			}
-			batch = batch[:0]
+		if _, err := send(buf[:b.bytes]); err != nil {
+			p.dropped.Add(1)
+		} else {
+			p.sent.Add(size)
 		}
-		f.release() // after copying: the mapping is no longer needed
 	}
 }
 
@@ -330,7 +327,7 @@ func (p *Puller) BytesPulled() uint64 { return p.bytesTotal.Load() }
 // BytesSent is the cumulative number of bytes handed to a successful send.
 func (p *Puller) BytesSent() uint64 { return p.sent.Load() }
 
-// Dropped is the number of buffers dropped on a send failure (link down /
+// Dropped is the number of batches dropped on a send failure (link down /
 // send budget exhausted).
 func (p *Puller) Dropped() uint64 { return p.dropped.Load() }
 
@@ -350,8 +347,8 @@ func (p *Puller) Framerate() float64 {
 	return float64(num) / float64(den)
 }
 
-// LastPTS is the last pulled buffer's presentation timestamp in ns (0 if
-// unset).
+// LastPTS is the presentation timestamp (ns) of the last pulled buffer that
+// carried one; 0 if none did (mpegtsmux output is untimed).
 func (p *Puller) LastPTS() uint64 { return p.lastPTS.Load() }
 
 // LastFrameAge is the time since the last pulled frame (0 if none yet). The
@@ -365,15 +362,9 @@ func (p *Puller) LastFrameAge() time.Duration {
 	return time.Duration(int64(nowMS())-last) * time.Millisecond
 }
 
-// Stop is a no-op in the pull model: nothing can block the streaming thread
-// (the pull happens on the Go drain goroutine). Kept so the ordered teardown
-// in run_gst.go is unchanged — Run exits when ctx is cancelled and the
-// frozen appsink's pull returns NULL.
-func (p *Puller) Stop() {}
-
-// Detach is a no-op safety seam kept for the ordered teardown in run_gst.go
-// (no signal to disconnect in the pull model — the element is owned by the
-// pipeline and unrefed with it).
+// Detach drops the Puller's reference to the appsink. Call it after the
+// pipeline has been stopped (the ordered teardown in run_gst.go); a Run that
+// is still finishing keeps its own reference.
 func (p *Puller) Detach() { p.el = nil }
 
 // nowMS is the monotonic millisecond clock (the original's getms()).

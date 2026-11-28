@@ -9,13 +9,6 @@ package gstutil
 #include <gst/gst.h>
 #include <gst/gstcontext.h>
 
-// Set a numeric (int/uint, any width) or enum property via the non-varargs
-// g_object_setv. In this GStreamer build the varargs g_object_set silently
-// drops int/enum GValues (the value is read back as 0), which makes every
-// integer property set a no-op — including the adaptive bitrate controller's
-// x264enc "bitrate". setv with a GValue typed to the property works.
-// Returns 0 on success, -1 when the object has no such property,
-// -2 when the property is not a numeric/enum type.
 // Deep (recursive) search of a bin for the first element created from the
 // named factory. Returns a new (floating) reference, NULL when absent.
 static GObject *gstutil_find_deep_factory(void *bin, const char *factory) {
@@ -35,6 +28,13 @@ static GObject *gstutil_find_deep_factory(void *bin, const char *factory) {
 	return found;
 }
 
+// Set a numeric (int/uint, any width) or enum property via the non-varargs
+// g_object_setv. In this GStreamer build the varargs g_object_set silently
+// drops int/enum GValues (the value is read back as 0), which makes every
+// integer property set a no-op — including the adaptive bitrate controller's
+// x264enc "bitrate". setv with a GValue typed to the property works.
+// Returns 0 on success, -1 when the object has no such property,
+// -2 when the property is not a numeric/enum type.
 int gstutil_set_num(void *obj, const char *name, long long value) {
 	GObject *o = (GObject *)obj;
 	if (o == NULL || name == NULL) {
@@ -223,8 +223,8 @@ func FindDeepByFactory(bin gst.Element, factory string) gst.Element {
 // hlsdemux2 audio PTS jump a resync rather than a silence-filling gap).
 //
 // The caller decides the SCOPE: the compositor pipeline attaches it to the
-// live BRANCH HEADS only (compositor, terminal appsink, shared audio
-// tail) — never the pipeline root. A root-level live context inherits into
+// shared audio tail head only (see CompositorPipeline.Start) — never the
+// pipeline root or the terminal appsink. A root-level live context inherits into
 // the upstream VOD source (uridecodebin → hlsdemux2, soup), which becomes
 // unpauseable and deadlocks on appsink backpressure (drop=false) at the
 // segment boundary / drains a finite playlist to EOS. The same-named-context

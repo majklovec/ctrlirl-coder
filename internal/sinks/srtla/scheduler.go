@@ -7,6 +7,11 @@ import (
 	"time"
 )
 
+// Both schedulers read an uplink through Uplink.schedState — one consistent
+// snapshot under one lock per uplink per packet — and all per-uplink
+// scheduling state (window, in-flight, NAK burst, stall count, weight) lives
+// on the Uplink. A scheduler itself only remembers its previous pick.
+
 // Scheduler ranks the uplinks and returns the index of the one a given
 // datagram should be sent on. All schedulers must return -1 when no
 // uplink is selectable (caller then drops the packet, per spec 14.3.2).
@@ -39,8 +44,6 @@ const (
 	FeedbackSrtlaAck
 	// FeedbackSrtNak is one lost sequence from an SRT NAK (0x8003).
 	FeedbackSrtNak
-	// FeedbackSrtNakRange is a full NAK run; sn carries the range start.
-	FeedbackSrtNakRange
 )
 
 // Enhanced mode tuning (spec 14.3.3).
@@ -55,82 +58,86 @@ const (
 	// enhancedRTTMax is the RTT scale past which the RTT term contributes
 	// its full penalty weight.
 	enhancedRTTMax = 100.0
+
+	// enhancedNAKQuiet: for this long after a NAK the stall counter is left
+	// alone — the path is at least reacting.
+	enhancedNAKQuiet = 2 * time.Second
 )
 
-// NewScheduler builds the scheduler for the config's mode.
+// NewScheduler builds the scheduler for the config's mode. Enhanced is the
+// default for "enhanced" and any unknown value, mirroring
+// Config.Normalized().
 func NewScheduler(mode string, log *slog.Logger) Scheduler {
-	if mode != ModeClassic {
-		// Enhanced is the default for "enhanced" and any unknown value,
-		// mirroring Config.Normalized().
-		return &enhancedScheduler{
-			log:      log,
-			lastNak:  make(map[*Uplink]time.Time),
-			stallCnt: make(map[*Uplink]int),
-		}
+	if mode == ModeClassic {
+		return &classicScheduler{}
 	}
-	return &classicScheduler{}
+	return &enhancedScheduler{log: log}
+}
+
+// applyFeedback routes receiver feedback to the uplink's congestion state
+// (the reference window math, plus the stall/NAK bookkeeping the enhanced
+// score reads, both live on the Uplink).
+func applyFeedback(u *Uplink, sn int32, kind FeedbackKind) {
+	switch kind {
+	case FeedbackSrtAck:
+		u.RegisterSRTAck(sn)
+	case FeedbackSrtlaAck:
+		u.RegisterACK(sn)
+	case FeedbackSrtNak:
+		u.RegisterNAK(sn)
+	}
 }
 
 type classicScheduler struct{}
 
+// Select picks the usable uplink with the best window/(inFlight+1); the
+// first one wins a tie.
 func (s *classicScheduler) Select(uplinks []*Uplink, now time.Time) int {
-	best := -1
-	bestScore := 0
+	best, bestScore := -1, 0
 	for i, u := range uplinks {
-		if !u.Established() || u.TimedOut() {
+		st := u.schedState(now)
+		if !st.usable {
 			continue
 		}
-		sc := u.Score()
-		if best < 0 || sc > bestScore {
+		if sc := st.window / (st.inFlight + 1); best < 0 || sc > bestScore {
 			best, bestScore = i, sc
 		}
 	}
 	return best
 }
 
-func (s *classicScheduler) Feedback(uplink *Uplink, sn int32, kind FeedbackKind, now time.Time) {
-	switch kind {
-	case FeedbackSrtAck:
-		uplink.RegisterSRTAck(sn)
-	case FeedbackSrtlaAck:
-		uplink.RegisterACK(sn)
-	case FeedbackSrtNak:
-		uplink.RegisterNAK(sn)
-	case FeedbackSrtNakRange:
-		uplink.RegisterNAKRange(sn, sn)
-	}
+func (s *classicScheduler) Feedback(u *Uplink, sn int32, kind FeedbackKind, _ time.Time) {
+	applyFeedback(u, sn, kind)
 }
 
 func (s *classicScheduler) MarkUnacked(*Uplink, time.Time) {}
 
 type enhancedScheduler struct {
-	// hyst holds the previous Select outcome so a trailing uplink within
-	// 10% sticks; the window map is per-uplink by pointer identity.
-	mu       sync.Mutex
-	hyst     int
-	hystIdx  int
-	log      *slog.Logger
-	lastNak  map[*Uplink]time.Time
-	stallCnt map[*Uplink]int
+	mu sync.Mutex
+	// hystIdx is the previous Select outcome: that uplink keeps the pick
+	// while its score stays within 10% of the best.
+	hystIdx int
+	log     *slog.Logger
 }
 
 func (s *enhancedScheduler) Select(uplinks []*Uplink, now time.Time) int {
-	if len(uplinks) == 0 {
-		return -1
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.prune(uplinks, now)
 
 	best, bestScore := -1, math.Inf(-1)
+	prev := 0.0 // this pass's score of the previous pick, if it is still usable
 	for i, u := range uplinks {
-		if !u.Established() || u.TimedOut() {
+		st := u.schedState(now)
+		if !st.usable {
 			continue
 		}
-		sc := s.score(u)
+		sc := enhancedScore(st)
 		u.SetWeight(sc)
 		if best < 0 || sc > bestScore {
 			best, bestScore = i, sc
+		}
+		if i == s.hystIdx {
+			prev = sc
 		}
 	}
 	if best < 0 {
@@ -138,47 +145,37 @@ func (s *enhancedScheduler) Select(uplinks []*Uplink, now time.Time) int {
 	}
 	// Hysteresis: keep the previous pick while it stays within 10% of the
 	// current best, cutting flapping between near-equal uplinks.
-	if s.hystIdx >= 0 && s.hystIdx < len(uplinks) &&
-		uplinks[s.hystIdx].Established() && !uplinks[s.hystIdx].TimedOut() {
-		prev := uplinks[s.hystIdx].Weight()
-		if prev > 0 && bestScore > 0 && prev >= bestScore*(1-enhancedHysteresis) && prev >= enhancedMinScore {
-			return s.hystIdx
-		}
+	if prev > 0 && bestScore > 0 && prev >= bestScore*(1-enhancedHysteresis) && prev >= enhancedMinScore {
+		return s.hystIdx
 	}
-	s.hystIdx, s.hyst = best, best
+	s.hystIdx = best
 	return best
 }
 
-// score implements the enhanced metric: the classic window ratio, damped by
-// the live RTT, recent packet loss, and the rolling NAK burst, then
-// stalling-penalised.
-func (s *enhancedScheduler) score(u *Uplink) float64 {
-	if u.TimedOut() {
-		return 0
-	}
-	base := float64(u.Window()) / (float64(u.InFlight()) + 1)
+// enhancedScore is the enhanced metric: the classic window ratio, damped by
+// the live RTT, recent packet loss, and the NAK burst, then
+// stalling-penalised and smoothed against the uplink's previous score.
+func enhancedScore(st schedState) float64 {
+	base := float64(st.window) / (float64(st.inFlight) + 1)
 
 	// RTT term: scale the classic ratio toward the minimum as RTT grows.
-	rtt := float64(u.RTTMs())
-	if rtt > enhancedRTTMax {
-		rtt = enhancedRTTMax
-	}
+	rtt := min(float64(st.rttMs), enhancedRTTMax)
 	rttFactor := 1 - 0.5*(rtt/enhancedRTTMax)
 
-	// Loss term: NAKs in the last second map onto a loss fraction.
+	// Loss term: NAKs in the current second map onto a loss fraction.
 	lossFactor := 1.0
-	if b := u.NAKBurst(); b > 0 {
-		lossFactor = 1.0 / (1.0 + 0.5*float64(b))
+	if st.nakBurst > 0 {
+		lossFactor = 1.0 / (1.0 + 0.5*float64(st.nakBurst))
 	}
 	// Burst penalty: >=5 NAKs in 1s drops the candidate sharply.
-	if b := u.NAKBurst(); b >= enhancedBurstThreshold {
+	if st.nakBurst >= enhancedBurstThreshold {
 		lossFactor *= 0.5
 	}
 
 	// Stall penalty: the backlog is large and SRTLA ACKs have not drained
 	// it; scales the score down up to enhancedStallMaxPenalty (50%).
-	if stall := s.stallCnt[u]; stall > 0 {
-		frac := math.Min(float64(stall)/float64(enhancedStallThreshold), 1)
+	if st.stalls > 0 {
+		frac := math.Min(float64(st.stalls)/float64(enhancedStallThreshold), 1)
 		lossFactor *= 1 - enhancedStallMaxPenalty*frac
 	}
 
@@ -187,78 +184,23 @@ func (s *enhancedScheduler) score(u *Uplink) float64 {
 		sc = enhancedMinScore
 		// Exponential decay of the weight so a repeatedly stalling path
 		// stays deprioritised (spec 14.3.3).
-		if prev := u.Weight(); prev > 0 && prev < sc {
-			sc = math.Min(sc, prev+enhancedMinScore)
+		if st.weight > 0 && st.weight < sc {
+			sc = math.Min(sc, st.weight+enhancedMinScore)
 		}
 	}
 	// Hysteresis smoothing: exponential moving average with alpha 0.2.
-	prev := u.Weight()
-	if prev > 0 {
-		sc = (1-enhancedAlpha)*prev + enhancedAlpha*sc
+	if st.weight > 0 {
+		sc = (1-enhancedAlpha)*st.weight + enhancedAlpha*sc
 	}
 	return sc
 }
 
-// Feedback applies the reference window math through the uplink and tracks
-// the enhanced stall/burst state.
-func (s *enhancedScheduler) Feedback(uplink *Uplink, sn int32, kind FeedbackKind, now time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	switch kind {
-	case FeedbackSrtAck:
-		uplink.RegisterSRTAck(sn)
-	case FeedbackSrtlaAck:
-		uplink.RegisterACK(sn)
-	case FeedbackSrtNak:
-		uplink.RegisterNAK(sn)
-		s.lastNak[uplink] = now
-	case FeedbackSrtNakRange:
-		uplink.RegisterNAKRange(sn, sn)
-		s.lastNak[uplink] = now
-	}
-	if kind == FeedbackSrtAck || kind == FeedbackSrtlaAck {
-		delete(s.stallCnt, uplink)
-	}
+func (s *enhancedScheduler) Feedback(u *Uplink, sn int32, kind FeedbackKind, _ time.Time) {
+	applyFeedback(u, sn, kind)
 }
 
 // MarkUnacked counts a non-draining in-flight state; the penalty scales
 // with the count up to enhancedStallThreshold consecutive marks.
-func (s *enhancedScheduler) MarkUnacked(uplink *Uplink, now time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// A fresh NAK restarts the counting window: the path is at least
-	// reacting, so the stall counter resets.
-	if last, ok := s.lastNak[uplink]; ok && now.Sub(last) < 2*time.Second {
-		return
-	}
-	if uplink.InFlight() >= enhancedStallThreshold {
-		s.stallCnt[uplink]++
-	} else {
-		delete(s.stallCnt, uplink)
-	}
-}
-
-// prune drops tracked state for uplinks that no longer exist (e.g. after a
-// SIGHUP IP-list reload re-created the set).
-func (s *enhancedScheduler) prune(uplinks []*Uplink, now time.Time) {
-	if s.lastNak == nil {
-		s.lastNak = make(map[*Uplink]time.Time)
-	}
-	if s.stallCnt == nil {
-		s.stallCnt = make(map[*Uplink]int)
-	}
-	alive := make(map[*Uplink]struct{}, len(uplinks))
-	for _, u := range uplinks {
-		alive[u] = struct{}{}
-	}
-	for u := range s.lastNak {
-		if _, ok := alive[u]; !ok {
-			delete(s.lastNak, u)
-		}
-	}
-	for u := range s.stallCnt {
-		if _, ok := alive[u]; !ok {
-			delete(s.stallCnt, u)
-		}
-	}
+func (s *enhancedScheduler) MarkUnacked(u *Uplink, now time.Time) {
+	u.noteUnacked(now)
 }

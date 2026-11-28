@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,9 +15,17 @@ import (
 	"ctrlirl-coder/internal/sinks"
 )
 
+// regRetryAfter is how long a registration attempt (REG1 sent, REG2 awaited)
+// blocks the next one.
+const regRetryAfter = 4 * time.Second
+
 // Sender aggregates complete SRT datagrams across registered SRTLA uplinks.
 // The SRT endpoint owns session negotiation and retransmission; SRT feedback
 // is returned to it through the handler installed with SetSRTFeedback.
+//
+// Lock order (outermost first): lifecycleMu → upMu → mu → the scheduler's
+// lock → Uplink.mu. feedbackMu is a leaf. The per-packet path (SendPacket)
+// takes upMu shared, then the scheduler and uplink locks.
 type Sender struct {
 	cfg *Config
 	log *slog.Logger
@@ -222,13 +231,6 @@ func (s *Sender) Uplinks() []*Uplink {
 	return s.uplinks
 }
 
-// GroupID returns the session's registration group identifier.
-func (s *Sender) GroupID() [IDLen]byte {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.groupID
-}
-
 // ActiveConnections reports the count of live (non-timed-out) uplinks.
 func (s *Sender) ActiveConnections() int {
 	s.mu.Lock()
@@ -252,16 +254,14 @@ func (s *Sender) SendPacket(pkt []byte) error {
 	if len(pkt) < SRTMinLen {
 		return fmt.Errorf("srtla: SRT packet is too short: %d bytes", len(pkt))
 	}
+	now := s.now()
 	ups, sc := s.snap()
-	idx := sc.Select(ups, s.now())
+	idx := sc.Select(ups, now)
 	if idx < 0 {
 		return ErrNoUplink
 	}
 	u := ups[idx]
-	if seq := SeqNumber(pkt); seq >= 0 {
-		u.NoteSent(seq)
-	}
-	if err := u.Send(pkt); err != nil {
+	if err := u.SendData(pkt, now); err != nil {
 		if !s.stopped() {
 			s.log.Error("srtla sendto failed, disabling link", "ip", u.IP, "err", err)
 			u.MarkDead()
@@ -381,7 +381,7 @@ func (s *Sender) uplinkLoop(u *Uplink) {
 		if c == nil {
 			return
 		}
-		n, src, err := c.ReadFromUDP(buf)
+		n, src, err := c.ReadFromUDPAddrPort(buf)
 		if err != nil {
 			if !s.stopped() {
 				s.log.Debug("srtla uplink read", "ip", u.IP, "err", err)
@@ -398,65 +398,26 @@ func (s *Sender) uplinkLoop(u *Uplink) {
 
 // handleFeedback consumes SRTLA control packets and forwards SRT packets to
 // the local SRT endpoint, updating uplink congestion state where applicable.
+// Every packet except REG_NGP and a rejected registration refreshes the
+// uplink's receive liveness.
 func (s *Sender) handleFeedback(u *Uplink, b []byte) {
-	typ := Type(b)
 	s.upMu.RLock()
 	defer s.upMu.RUnlock()
 	ups, sc := s.uplinks, s.sched
-	found := false
-	for _, up := range ups {
-		if up == u {
-			found = true
-			break
-		}
+	if !slices.Contains(ups, u) {
+		return // an uplink a reload has already replaced
 	}
-	if !found {
-		return
-	}
+	now := s.now()
 
-	switch {
-	case typ == TypeREGNGP:
+	switch typ := Type(b); typ {
+	case TypeREGNGP:
 		// NGP must not update last_recv (it would mask dead links).
-		s.mu.Lock()
-		canReg := s.activeConns == 0 && s.pendingReg2 == nil && s.now().After(s.pendingRegT)
-		if canReg {
-			s.pendingReg2 = u
-			s.pendingRegT = s.now().Add(4 * time.Second)
-		}
-		s.mu.Unlock()
-		if canReg && !s.sendREG1(u) {
-			s.mu.Lock()
-			if s.pendingReg2 == u {
-				s.pendingReg2 = nil
-			}
-			s.mu.Unlock()
-		}
-		return
+		s.startRegistration(u, now)
 
-	case typ == TypeREG2:
-		s.mu.Lock()
-		if s.pendingReg2 == u {
-			id, ok := ParseREG2(b)
-			if !ok || !halfEquals(id, s.groupID) {
-				s.mu.Unlock()
-				s.log.Error("srtla REG2 id mismatch", "ip", u.IP)
-				return
-			}
-			s.groupID = id // adopt (normally identical; mirrors reference memcpy)
-			s.pendingReg2 = nil
-			s.pendingRegT = s.now().Add(4 * time.Second)
-			s.mu.Unlock()
-			for _, up := range ups {
-				if err := up.Send(BuildREG2(id)); err != nil && !s.stopped() {
-					s.log.Warn("srtla: register uplink", "ip", up.IP, "err", err)
-				}
-			}
-			return
-		}
-		s.mu.Unlock()
-		return
+	case TypeREG2:
+		s.confirmGroup(u, ups, b, now)
 
-	case typ == TypeREG3:
+	case TypeREG3:
 		s.mu.Lock()
 		s.hasConnected = true
 		if !u.Established() {
@@ -466,54 +427,51 @@ func (s *Sender) handleFeedback(u *Uplink, b []byte) {
 		u.RegDone()
 		u.TouchRecv()
 		s.log.Info("srtla connection established", "ip", u.IP)
-		return
 
-	case typ == TypeACK:
-		for _, id := range ParseACKs(b) {
-			sc.Feedback(u, id, FeedbackSrtlaAck, s.now())
+	case TypeACK:
+		for p := ackSeqs(b); len(p) >= 4; p = p[4:] {
+			sc.Feedback(u, seqAt(p), FeedbackSrtlaAck, now)
 			s.ackTotal.Add(1)
 		}
 		u.TouchRecv()
-		sc.MarkUnacked(u, s.now())
-		return
+		sc.MarkUnacked(u, now)
 
-	case typ == TypeKeepalive:
+	case TypeKeepalive:
 		// Extended keepalives may carry receiver telemetry.
 		if info, ok := ParseExtendedKeepalive(b); ok && info.RTTMs > 0 {
 			u.SetRTT(info.RTTMs)
 		}
 		u.TouchRecv()
-		return
 
-	case typ == SRTTypeACK:
+	case SRTTypeACK:
+		// A cumulative SRT ACK covers the whole stream: every uplink.
 		if ack, ok := SRTAckLast(b); ok {
 			for _, up := range ups {
-				sc.Feedback(up, ack, FeedbackSrtAck, s.now())
+				sc.Feedback(up, ack, FeedbackSrtAck, now)
 			}
 			s.ackTotal.Add(1)
 		}
 		u.TouchRecv()
 		s.forwardSRT(b)
-		return
 
-	case typ == SRTTypeNAK:
-		losses := SRTNAKLosses(b)
-		for _, sn := range losses {
+	case SRTTypeNAK:
+		// The lost packet sits in exactly one uplink's ring; the others
+		// ignore the sequence.
+		for _, sn := range SRTNAKLosses(b) {
 			for _, up := range ups {
-				sc.Feedback(up, sn, FeedbackSrtNak, s.now())
+				sc.Feedback(up, sn, FeedbackSrtNak, now)
 			}
 			s.nakTotal.Add(1)
 		}
 		u.TouchRecv()
 		s.forwardSRT(b)
-		return
 
-	case typ == TypeREGErr || typ == TypeREGNAK:
+	case TypeREGErr, TypeREGNAK:
 		s.log.Error("srtla: receiver rejected registration", "ip", u.IP, "type", fmt.Sprintf("%#04x", typ))
 		u.MarkDead()
-		return
 
 	default:
+		// SRT data, or any other SRT control packet: the SRT endpoint's.
 		if len(b) >= SRTMinLen && (SeqNumber(b) >= 0 || typ <= 0x8008 || typ == 0xffff) {
 			u.TouchRecv()
 			s.forwardSRT(b)
@@ -523,13 +481,52 @@ func (s *Sender) handleFeedback(u *Uplink, b []byte) {
 	}
 }
 
-// sendREG1 sends the registration request and reports success.
-func (s *Sender) sendREG1(u *Uplink) bool {
-	err := u.Send(BuildREG1(s.GroupID()))
-	if err == nil {
-		u.lastSentNow()
+// startRegistration answers REG_NGP ("no group, register"): when no uplink
+// is active and no attempt is pending, u becomes the pending path and sends
+// REG1 with the proposed group ID.
+func (s *Sender) startRegistration(u *Uplink, now time.Time) {
+	s.mu.Lock()
+	canReg := s.activeConns == 0 && s.pendingReg2 == nil && now.After(s.pendingRegT)
+	if canReg {
+		s.pendingReg2 = u
+		s.pendingRegT = now.Add(regRetryAfter)
 	}
-	return err == nil
+	group := s.groupID
+	s.mu.Unlock()
+	if !canReg || u.Send(BuildREG1(group)) == nil {
+		return
+	}
+	// REG1 did not go out: free the slot for another uplink.
+	s.mu.Lock()
+	if s.pendingReg2 == u {
+		s.pendingReg2 = nil
+	}
+	s.mu.Unlock()
+}
+
+// confirmGroup handles REG2 on the pending uplink: the receiver's group ID
+// is adopted and every uplink registers itself under it with its own REG2.
+func (s *Sender) confirmGroup(u *Uplink, ups []*Uplink, b []byte, now time.Time) {
+	s.mu.Lock()
+	if s.pendingReg2 != u {
+		s.mu.Unlock()
+		return
+	}
+	id, ok := ParseREG2(b)
+	if !ok || !halfEquals(id, s.groupID) {
+		s.mu.Unlock()
+		s.log.Error("srtla REG2 id mismatch", "ip", u.IP)
+		return
+	}
+	s.groupID = id // adopt (normally identical; mirrors reference memcpy)
+	s.pendingReg2 = nil
+	s.pendingRegT = now.Add(regRetryAfter)
+	s.mu.Unlock()
+	for _, up := range ups {
+		if err := up.Send(BuildREG2(id)); err != nil && !s.stopped() {
+			s.log.Warn("srtla: register uplink", "ip", up.IP, "err", err)
+		}
+	}
 }
 
 // housekeeping runs the 1-second maintenance tick (reference
@@ -575,7 +572,7 @@ func (s *Sender) tick() {
 			continue
 		}
 		active++
-		if now.Sub(u.LastActivity()) > IDLE_KEEP {
+		if now.Sub(u.LastActivity()) > KeepaliveIdle {
 			s.sendKeepalive(u)
 		}
 	}
@@ -587,7 +584,7 @@ func (s *Sender) tick() {
 		if s.allFailedAt.IsZero() {
 			s.allFailedAt = now
 		}
-		if now.Sub(s.allFailedAt) > FAIL_OVER {
+		if now.Sub(s.allFailedAt) > FailoverAfter {
 			if s.destIdx+1 < len(s.dests) {
 				s.destIdx++
 				for _, u := range s.uplinks {
@@ -634,9 +631,7 @@ func (s *Sender) sendKeepalive(u *Uplink) {
 	} else {
 		pkt = BuildKeepalive()
 	}
-	if err := u.Send(pkt); err == nil {
-		u.lastSentNow()
-	}
+	_ = u.Send(pkt) // a failed keepalive shows up as a timeout
 }
 
 // Close releases the uplink sockets, idempotently.

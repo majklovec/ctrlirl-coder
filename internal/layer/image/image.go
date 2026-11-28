@@ -4,8 +4,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/go-gst/go-gst/pkg/gst"
-
 	"ctrlirl-coder/internal/layer"
 	"ctrlirl-coder/internal/scene"
 )
@@ -27,27 +25,20 @@ func NewImageOverlay(l scene.Layer) *ImageOverlay {
 // BuildChain links filesrc → (png|jpeg)parse → (png|jpeg)dec →
 // videoconvert → capsfilter(BGRA) → queue.
 func (i *ImageOverlay) BuildChain() (*layer.Chain, error) {
-	head := make([]gst.Element, 0, 3)
-	fs, err := layer.MakeElement("filesrc", i.L.ID+"-filesrc", map[string]any{"location": i.L.Source})
+	specs := []layer.Spec{{
+		Factory: "filesrc", Name: i.L.ID + "-filesrc",
+		Props: map[string]any{"location": i.L.Source},
+	}}
+	for _, kind := range imageDecodeKinds(i.L.Source) {
+		specs = append(specs, layer.Spec{Factory: kind, Name: i.L.ID + "-" + kind})
+	}
+	head, err := layer.Build(specs...)
 	if err != nil {
 		return nil, err
 	}
-	head = append(head, fs)
-	for _, kind := range imageDecodeKinds(i.L.Source) {
-		el, err := layer.MakeElement(kind, i.L.ID+"-"+kind, nil)
-		if err != nil {
-			return nil, err
-		}
-		head = append(head, el)
-	}
-	// Returned unlinked; the compositor adds the elements to the pipeline
-	// and then links the chain (GStreamer 1.28's gst_bin_add breaks links
-	// made before insertion).
 	return layer.SurfaceChain(i.L, head...)
 }
 
-// imageDecodeKinds returns the [parse, dec] element factory names for the
-// file's image format (by extension).
 func imageDecodeKinds(path string) []string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".jpg", ".jpeg":

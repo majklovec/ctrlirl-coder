@@ -3,6 +3,7 @@ package video
 import (
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -20,9 +21,10 @@ import (
 type VideoSource struct {
 	layer.BaseLayer
 
-	// audioSpecs is the dynamic audio source of the layer, or nil for
-	// video-only sources (test pattern, /dev/ capture).
-	audioSpecs []string
+	// audioSource is the layer's own audio source chain (ending in a
+	// runtime-pad element), or nil for sources without one of their own
+	// (test pattern, /dev/ capture, HTTP — see sharedSource).
+	audioSource []layer.Spec
 	// sharedSource is the decodebin the video chain already owns (HTTP/HTTPS
 	// sources). The audio chain hooks its audio pad instead of fetching the
 	// stream a second time — two independent live fetchers each buffer and
@@ -38,87 +40,101 @@ func NewVideoSource(l scene.Layer) *VideoSource {
 	return &VideoSource{BaseLayer: layer.NewBaseLayer(l, scene.LayerTypeVideo)}
 }
 
-// BuildChain selects the source element for the layer's source and links the
-// full chain source → [decodebin] → videoconvert → capsfilter(BGRA) → queue.
+// spec names an element of this layer: "<layer id>-<suffix>".
+func (v *VideoSource) spec(factory, suffix string, props map[string]any) layer.Spec {
+	return layer.Spec{Factory: factory, Name: v.L.ID + "-" + suffix, Props: props}
+}
+
+// BuildChain selects the source for the layer's `source` and returns the
+// chain source → [decodebin] → [filters] → videoconvert → videoscale →
+// capsfilter(BGRA) → queue.
+//
+// Elements are returned unlinked: the compositor adds them to the pipeline
+// and then links the chain (GStreamer 1.28's gst_bin_add breaks links made
+// before insertion).
 func (v *VideoSource) BuildChain() (*layer.Chain, error) {
 	var (
-		dynamicIndex = -1
-		audioSpecs   []string
-		err          error
-		srcs         []gst.Element
-		source       = strings.TrimSpace(v.L.Source)
+		head    []gst.Element
+		err     error
+		dynamic = -1 // index of the runtime-pad source in head
+		source  = strings.TrimSpace(v.L.Source)
 	)
 	switch {
 	case strings.HasPrefix(source, "testsrc:"):
-		pattern, frequency, parseErr := parseTestSource(source)
-		if parseErr != nil {
-			return nil, fmt.Errorf("layer %s: %w", v.L.ID, parseErr)
+		pattern, frequency, perr := parseTestSource(source)
+		if perr != nil {
+			return nil, fmt.Errorf("layer %s: %w", v.L.ID, perr)
 		}
 		v.testToneHz = frequency
-		srcs, err = v.sourceChain([]string{"videotestsrc:videotestsrc"}, map[string]any{
+		head, err = layer.Build(v.spec("videotestsrc", "videotestsrc", map[string]any{
 			"is-live": true,
 			"pattern": int32(pattern),
-		})
+		}))
+
 	case source == "":
-		// No source pin: test pattern (useful for smoke tests).
-		srcs, err = v.sourceChain([]string{"videotestsrc:videotestsrc"}, map[string]any{"is-live": true})
-	case strings.HasPrefix(source, "srt://") || strings.HasPrefix(source, "urisrt://"):
-		srcs, err = v.sourceChain([]string{"srtsrc:srtsrc"}, map[string]any{"uri": source})
+		// No source: test pattern (useful for smoke tests).
+		head, err = layer.Build(v.spec("videotestsrc", "videotestsrc", map[string]any{"is-live": true}))
+
+	case isSRTSource(source):
+		head, err = layer.Build(v.spec("srtsrc", "srtsrc", map[string]any{"uri": source}))
 		// "aud" name infix: pipeline element names must be unique and the
 		// video chain already claims <id>-srtsrc.
-		audioSpecs = []string{"srtsrc:audsrtsrc"}
+		v.audioSource = []layer.Spec{v.spec("srtsrc", "audsrtsrc", map[string]any{"uri": source})}
+
 	case strings.HasPrefix(source, "/dev/"):
-		srcs, err = v.sourceChain([]string{"v4l2src:v4l2src"}, map[string]any{"device": source})
+		head, err = layer.Build(v.spec("v4l2src", "v4l2src", map[string]any{"device": source}))
+
 	case isHTTPSource(source):
-		srcs, err = v.sourceChain([]string{"uridecodebin3:uridecodebin3"}, map[string]any{"uri": source})
+		// Pre-buffer after the decodebin: absorbs decode/network hitches
+		// (queue leaks downstream, never drops). The periodic 10 s content
+		// hole is fixed elsewhere — the hlsdemux2 download watermark clamp
+		// (compositor/hls_watermark.go); a queue cannot invent content the
+		// demux skips (verified by A/B capture).
+		prebuf := v.spec("queue", "prebuf", map[string]any{"max-size-buffers": 45})
+		uri := map[string]any{"uri": source}
+		head, err = layer.Build(v.spec("uridecodebin3", "uridecodebin3", uri), prebuf)
 		if err != nil {
-			srcs, err = v.sourceChain([]string{"uridecodebin:uridecodebin"}, map[string]any{"uri": source})
+			head, err = layer.Build(v.spec("uridecodebin", "uridecodebin", uri), prebuf)
 		}
 		if err == nil {
-			dynamicIndex = 0
+			dynamic = 0
 			// One uridecodebin feeds BOTH chains: its video_0 pad drives the
 			// video tail, its audio_0 pad the layer audio chain (see
 			// AudioChain). A second fetcher for the audio would drift the
 			// A/V offset live — the source element is shared, not duplicated.
-			v.sharedSource = srcs[0]
-			// Pre-buffer after the decodebin: absorbs decode/network hitches
-			// (queue leaks downstream, never drops). The periodic 10 s
-			// content hole is fixed elsewhere — the hlsdemux2 download
-			// watermark clamp (compositor/hls_watermark.go); a queue cannot
-			// invent content the demux skips (verified by A/B capture).
-			prebuf, pErr := layer.MakeElement("queue", v.L.ID+"-prebuf", map[string]any{"max-size-buffers": 45})
-			if pErr != nil {
-				return nil, pErr
-			}
-			srcs = append(srcs, prebuf)
+			v.sharedSource = head[0]
 		}
-	default:
-		srcs, err = v.sourceChain([]string{"filesrc:filesrc", "decodebin:decodebin"}, map[string]any{"location": source})
-		if err == nil {
-			dynamicIndex = len(srcs) - 1
-		}
-		audioSpecs = []string{"filesrc:audfilesrc", "decodebin:auddecodebin"}
-	}
-	if err != nil {
-		return nil, err
-	}
-	v.audioSpecs = audioSpecs
 
-	// Elements are returned unlinked: the compositor adds them to the
-	// pipeline and then links the chain (GStreamer 1.28's gst_bin_add breaks
-	// links made before insertion). Filters land between the source and the
-	// videoconvert tail.
-	// The pre-filter videoconvert (present when the layer has video
-	// filters) lives in VideoFilters: decoders emit I420/Y420, and
-	// `rotate` refuses those — without the convert the link fails, the
-	// layer pad never produces a buffer, and the compositor (which needs
-	// every pad) goes fully black.
-	chain, err := layer.SurfaceChain(v.L, srcs...)
+	default: // a local file
+		head, err = layer.Build(
+			v.spec("filesrc", "filesrc", map[string]any{"location": source}),
+			v.spec("decodebin", "decodebin", nil),
+		)
+		dynamic = 1
+		v.audioSource = []layer.Spec{
+			v.spec("filesrc", "audfilesrc", map[string]any{"location": source}),
+			v.spec("decodebin", "auddecodebin", nil),
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
-	chain.DynamicSourceIndex = dynamicIndex
+
+	chain, err := layer.SurfaceChain(v.L, head...)
+	if err != nil {
+		return nil, err
+	}
+	chain.DynamicSourceIndex = dynamic
 	return chain, nil
+}
+
+// audioTail is the [audioconvert, queue] every audio chain of this layer
+// ends in; prefix keeps the names of the tone and the media variant apart.
+func (v *VideoSource) audioTail(prefix string) []layer.Spec {
+	return []layer.Spec{
+		v.spec("audioconvert", prefix+"conv", nil),
+		v.spec("queue", prefix+"queue", map[string]any{"max-size-buffers": 60}),
+	}
 }
 
 // AudioChain returns the layer's raw-PCM audio chain for media sources that
@@ -128,42 +144,22 @@ func (v *VideoSource) BuildChain() (*layer.Chain, error) {
 // used (the source may not negotiate its audio track until runtime).
 // Returns (nil, nil) for audio-less layers (test pattern, /dev/ capture).
 func (v *VideoSource) AudioChain() (*layer.Chain, error) {
-	if v.testToneHz > 0 {
-		src, err := layer.MakeElement("audiotestsrc", v.L.ID+"-tone", map[string]any{
+	switch {
+	case v.testToneHz > 0:
+		tone := v.spec("audiotestsrc", "tone", map[string]any{
 			"is-live": true,
 			"wave":    int32(0),
 			"freq":    v.testToneHz,
 		})
+		els, err := layer.Build(slices.Concat([]layer.Spec{tone}, v.audioTail("tone-"))...)
 		if err != nil {
 			return nil, err
 		}
-		conv, err := layer.MakeElement("audioconvert", v.L.ID+"-tone-conv", nil)
-		if err != nil {
-			return nil, err
-		}
-		q, err := layer.MakeElement("queue", v.L.ID+"-tone-queue", map[string]any{"max-size-buffers": 60})
-		if err != nil {
-			return nil, err
-		}
-		return &layer.Chain{Elements: []gst.Element{src, conv, q}, DynamicSourceIndex: -1}, nil
-	}
-	if v.sharedSource == nil && len(v.audioSpecs) == 0 {
-		return nil, nil
-	}
-	fail := func(format string, args ...any) (*layer.Chain, error) {
-		return nil, fmt.Errorf(format, args...)
-	}
-	conv, err := layer.MakeElement("audioconvert", v.L.ID+"-audconv", nil)
-	if err != nil {
-		return fail("layer: %v", err)
-	}
-	q, err := layer.MakeElement("queue", v.L.ID+"-audqueue", map[string]any{"max-size-buffers": 60})
-	if err != nil {
-		return fail("layer: %v", err)
-	}
-	if v.sharedSource != nil {
+		return layer.StaticChain(els...), nil
+
+	case v.sharedSource != nil:
 		// The video chain already added the decodebin to the pipeline; hook
-		// its audio_0 pad onto this head (Chain.SharedSource). No second
+		// its audio_0 pad onto this tail (Chain.SharedSource). No second
 		// fetcher: one network stream, one running time, A/V can't drift.
 		//
 		// hlsdemux2 splices each 10 s TS segment with a ~0.3 s per-segment audio
@@ -173,21 +169,24 @@ func (v *VideoSource) AudioChain() (*layer.Chain, error) {
 		// is a bounded jitter, not a running-time break. (A full VOD pre-buffer
 		// of this source decodes with no such offset — see IMPLEMENTATION.md —
 		// so no downstream resampler can recover the bridged samples.)
+		tail, err := layer.Build(v.audioTail("aud")...)
+		if err != nil {
+			return nil, err
+		}
+		return &layer.Chain{Elements: tail, SharedSource: v.sharedSource, DynamicPadAudio: true}, nil
+
+	case len(v.audioSource) > 0:
+		els, err := layer.Build(slices.Concat(v.audioSource, v.audioTail("aud"))...)
+		if err != nil {
+			return nil, err
+		}
 		return &layer.Chain{
-			Elements:        []gst.Element{conv, q},
-			SharedSource:    v.sharedSource,
-			DynamicPadAudio: true,
+			Elements:           els,
+			DynamicSourceIndex: len(v.audioSource) - 1,
+			DynamicPadAudio:    true,
 		}, nil
 	}
-	srcs, err := v.sourceChain(v.audioSpecs, audioSourceProps(v.L.Source))
-	if err != nil {
-		return fail("layer: %v", err)
-	}
-	return &layer.Chain{
-		Elements:           append(srcs, conv, q),
-		DynamicSourceIndex: len(srcs) - 1,
-		DynamicPadAudio:    true,
-	}, nil
+	return nil, nil
 }
 
 func parseTestSource(source string) (int, float64, error) {
@@ -226,39 +225,10 @@ func parseTestSource(source string) (int, float64, error) {
 	return pattern, frequency, nil
 }
 
-// audioSourceProps selects the per-source element properties of an audio
-// chain: the source element is the first one in the chain, so filesrc gets
-// its location and srtsrc/uridecodebin get their URI.
-func audioSourceProps(source string) map[string]any {
-	switch {
-	case strings.HasPrefix(source, "srt://") || strings.HasPrefix(source, "urisrt://"):
-		return map[string]any{"uri": source}
-	case strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://"):
-		return map[string]any{"uri": source}
-	default:
-		return map[string]any{"location": source}
-	}
+func isSRTSource(source string) bool {
+	return strings.HasPrefix(source, "srt://") || strings.HasPrefix(source, "urisrt://")
 }
 
 func isHTTPSource(source string) bool {
 	return strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://")
-}
-
-// sourceChain builds the given source elements (factory:name pairs) and
-// applies the factory-keyed properties to the first element.
-func (v *VideoSource) sourceChain(specs []string, props map[string]any) ([]gst.Element, error) {
-	els := make([]gst.Element, 0, len(specs))
-	for i, spec := range specs {
-		parts := strings.SplitN(spec, ":", 2)
-		factory, name := parts[0], v.L.ID+"-"+parts[1]
-		el, err := layer.MakeElement(factory, name, nil)
-		if err != nil {
-			return nil, err
-		}
-		if i == 0 && len(props) > 0 {
-			el.SetObjectProperties(props)
-		}
-		els = append(els, el)
-	}
-	return els, nil
 }

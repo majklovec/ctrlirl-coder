@@ -65,15 +65,16 @@ func (f *recApplier) UpdateLayerProps(ctx context.Context, id string, props map[
 		f.failNext, f.failed = false, "update:"+id
 		return errors.New("injected update failure")
 	}
-	f.ops = append(f.ops, "update:"+id)
-	if !f.blockNext {
-		return nil
-	}
-	f.blockNext = false
+	// The concurrency test polls count() from another goroutine while this
+	// op is in flight, so the record and the hook state are read under mu.
 	f.mu.Lock()
-	ch := f.releaseCh
+	f.ops = append(f.ops, "update:"+id)
+	block, ch := f.blockNext, f.releaseCh
+	f.blockNext = false
 	f.mu.Unlock()
-	<-ch
+	if block {
+		<-ch
+	}
 	return nil
 }
 func (f *recApplier) UpdateLayerFilter(ctx context.Context, id string, index int, spec scene.FilterSpec) error {
@@ -596,5 +597,20 @@ func TestModifyConcurrentNoLostEdit(t *testing.T) {
 	}
 	if bAlpha != 1 {
 		t.Fatalf("edit B lost: b.alpha = %v, want 1", bAlpha)
+	}
+}
+
+// The scene list is part of the wire format: an empty list is [], never
+// null, and names come sorted.
+func TestSceneNamesEmptyIsListAndSorted(t *testing.T) {
+	ctl := New(&recApplier{}, nil, nil)
+	if got := mustJSON(t, ctl.SceneNames()); got != "[]" {
+		t.Fatalf("no scenes: SceneNames encodes as %s, want []", got)
+	}
+	for _, name := range []string{"b", "c", "a"} {
+		ctl.Register(name, &scene.Scene{Name: name})
+	}
+	if got := mustJSON(t, ctl.SceneNames()); got != `["a","b","c"]` {
+		t.Fatalf("SceneNames = %s, want sorted", got)
 	}
 }

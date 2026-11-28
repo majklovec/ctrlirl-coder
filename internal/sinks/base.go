@@ -103,9 +103,3 @@ func EncoderUnits(encoderName string) int {
 	}
 	return 1000
 }
-
-// BitratePropertyValue converts a bps target into the encoder "bitrate"
-// property value for the given name.
-func BitratePropertyValue(encoderName string, bps int) int64 {
-	return int64(bps / EncoderUnits(encoderName))
-}

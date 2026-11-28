@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,7 +23,7 @@ type srtlaSink struct {
 	sender *srtla.Sender
 	client *srt.Client
 	relay  *net.UDPConn
-	peer   atomic.Pointer[net.UDPAddr]
+	peer   atomic.Pointer[netip.AddrPort] // the local SRT socket; nil until its handshake
 	log    *slog.Logger
 
 	closeOnce sync.Once
@@ -39,13 +40,7 @@ func newSRTLASink(cfg *config.Config, log *slog.Logger) (*srtlaSink, error) {
 	if err != nil {
 		return nil, fmt.Errorf("srtla: bind local SRT relay: %w", err)
 	}
-	client, err := srt.NewClient(srt.ClientConfig{
-		URI:              "srt://" + relay.LocalAddr().String(),
-		LatencyMs:        cfg.SRT.LatencyMs,
-		StreamID:         cfg.SRT.StreamID,
-		Passphrase:       cfg.SRT.Passphrase,
-		MaxBandwidthKbps: cfg.SRT.MaxBandwidthKbps,
-	}, log)
+	client, err := srt.NewClient(srtClientConfig(cfg, "srt://"+relay.LocalAddr().String()), log)
 	if err != nil {
 		relay.Close()
 		return nil, fmt.Errorf("srtla: create SRT client: %w", err)
@@ -92,7 +87,7 @@ func (s *srtlaSink) Run(ctx context.Context) error {
 func (s *srtlaSink) relaySRT() error {
 	buf := make([]byte, 4096)
 	for {
-		n, addr, err := s.relay.ReadFromUDP(buf)
+		n, addr, err := s.relay.ReadFromUDPAddrPort(buf)
 		if err != nil {
 			if s.isClosed() {
 				return nil
@@ -104,13 +99,13 @@ func (s *srtlaSink) relaySRT() error {
 			s.log.Warn("srtla: ignoring short local SRT packet", "bytes", n)
 			continue
 		}
-		peer := s.peer.Load()
-		if peer == nil || peer.AddrPort() != addr.AddrPort() {
+		if peer := s.peer.Load(); peer == nil || *peer != addr {
+			// Only a handshake may introduce (or replace) the local peer.
 			if srtla.Type(pkt) != srtla.SRTTypeHandshake {
 				s.log.Warn("srtla: ignoring packet from unknown local SRT peer", "peer", addr)
 				continue
 			}
-			s.peer.Store(addr)
+			s.peer.Store(&addr)
 		}
 		if err := s.sender.SendPacket(pkt); err != nil && !errors.Is(err, srtla.ErrNoUplink) && !s.isClosed() {
 			s.log.Warn("srtla: failed to relay SRT packet", "err", err)
@@ -123,7 +118,7 @@ func (s *srtlaSink) forwardSRT(pkt []byte) error {
 	if peer == nil {
 		return errors.New("local SRT peer has not connected")
 	}
-	if _, err := s.relay.WriteToUDP(pkt, peer); err != nil {
+	if _, err := s.relay.WriteToUDPAddrPort(pkt, *peer); err != nil {
 		return fmt.Errorf("write local SRT packet: %w", err)
 	}
 	return nil
@@ -142,16 +137,14 @@ func (s *srtlaSink) Stats() (sinks.Stats, error) {
 	if err != nil {
 		return sinks.Stats{}, err
 	}
-	aggregate.RTT = session.RTT
-	aggregate.PacketLossRate = session.PacketLossRate
-	aggregate.SendRateMbps = session.SendRateMbps
-	aggregate.BandwidthEstimate = session.BandwidthEstimate
-	aggregate.RetransmitRate = session.RetransmitRate
-	aggregate.PktSndLossTotal = session.PktSndLossTotal
-	aggregate.PktRetransTotal = session.PktRetransTotal
-	aggregate.SendBufferBytes = session.SendBufferBytes
-	aggregate.PacketsReceivedTotal = session.PacketsReceivedTotal
-	return aggregate, nil
+	// The SRT session knows the end-to-end link (RTT, loss, rates, send
+	// buffer); only the feedback and packet counters and the sample time
+	// come from the aggregator, which sees every uplink.
+	st := session
+	st.ACKTotal = aggregate.ACKTotal
+	st.PacketsSentTotal = aggregate.PacketsSentTotal
+	st.TimestampMs = aggregate.TimestampMs
+	return st, nil
 }
 
 func (s *srtlaSink) Reload(cfg srtla.Config) error {

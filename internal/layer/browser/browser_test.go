@@ -35,21 +35,6 @@ func TestSanitizeSinkID(t *testing.T) {
 	}
 }
 
-func TestIntProp(t *testing.T) {
-	l := scene.Layer{Properties: map[string]float64{"framerate": 60, "quality": 0}}
-	if got := intProp(l, "framerate", 30); got != 60 {
-		t.Errorf("intProp framerate = %d, want 60", got)
-	}
-	// quality=0 is not > 0, so it falls back to the default.
-	if got := intProp(l, "quality", 75); got != 75 {
-		t.Errorf("intProp quality = %d, want 75 (0 falls back)", got)
-	}
-	// Missing key falls back.
-	if got := intProp(l, "width", 1280); got != 1280 {
-		t.Errorf("intProp width = %d, want 1280", got)
-	}
-}
-
 func TestNewBrowserOverlay_Basics(t *testing.T) {
 	l := scene.Layer{ID: "b1", Type: "browser", Source: "https://example.com"}
 	b := NewBrowserOverlay(l)
@@ -128,5 +113,44 @@ for(let y=0;y<360;y+=8){
 	}
 	if _, _, _, a := img.At(640, bounds.Dy()-40).RGBA(); a != 0 {
 		t.Errorf("background pixel alpha = %#x, want 0 (transparent)", a)
+	}
+}
+
+// chromeHomes lists the Chrome home directories currently in the temp dir.
+func chromeHomes(t *testing.T) map[string]bool {
+	t.Helper()
+	dirs, err := filepath.Glob(filepath.Join(os.TempDir(), "ctrlirl-chrome-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := make(map[string]bool, len(dirs))
+	for _, d := range dirs {
+		set[d] = true
+	}
+	return set
+}
+
+// Every session used to leave its Chrome home behind in the temp dir: only
+// the browser process was killed, and its children were still writing into
+// the profile while it was being removed.
+func TestCDPSessionStopRemovesChromeHome(t *testing.T) {
+	if _, err := findChrome(); err != nil {
+		t.Skip("no Chrome available")
+	}
+	before := chromeHomes(t)
+	for i := 0; i < 3; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+		sess, err := newCDPSession(ctx, "", "", 640, 360)
+		cancel()
+		if err != nil {
+			t.Fatalf("newCDPSession: %v", err)
+		}
+		sess.stop()
+	}
+	time.Sleep(300 * time.Millisecond) // a straggler would recreate its files by now
+	for d := range chromeHomes(t) {
+		if !before[d] {
+			t.Errorf("Chrome home left behind: %s", d)
+		}
 	}
 }

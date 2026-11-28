@@ -54,7 +54,8 @@ type SRTParams struct {
 	URI        string `toml:"uri"`
 	StreamID   string `toml:"streamid"`
 	Passphrase string `toml:"passphrase"`
-	// MaxBandwidthKbps, when > 0, caps the SRT send rate (SRTO_MAXBW, kbit/s).
+	// MaxBandwidthKbps, when > 0, caps the SRT send rate in kbit/s (converted
+	// to the bytes/s SRTO_MAXBW takes).
 	MaxBandwidthKbps int `toml:"max_bandwidth_kbps"`
 }
 
@@ -113,16 +114,6 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	return cfg, nil
-}
-
-// Reload re-reads the file from disk and returns (prev, next) so callers can
-// compute a diff-friendly snapshot. Both pointers are fully populated.
-func (c *Config) Reload(path string) (prev, next *Config, err error) {
-	nx, e := Load(path)
-	if e != nil {
-		return c, nil, e
-	}
-	return c, nx, nil
 }
 
 func (c *Config) applyDefaults() {

@@ -1,6 +1,7 @@
 // Package main is the ctrlirl-coder entry point: CLI flags, config/scene
-// loading, and dispatch to the runtime variant (pure-Go dry-run or the
-// GStreamer pipeline, selected by the gstreamer build tag).
+// loading, the pure-Go --dry-run validation, and the GStreamer runtime
+// (run_gst.go). There is one build: cgo with GStreamer and the CERALIVE SRT
+// fork.
 package main
 
 import (
@@ -28,7 +29,7 @@ func parseFlags(args []string) (*options, error) {
 	fs.StringVar(&o.scenePath, "scene", "", "path to scene JSON file (multi-layer)")
 	fs.StringVar(&o.pipeline, "pipeline", "", "path to pipeline template file")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "validate configuration and exit (no GStreamer)")
-	fs.StringVar(&o.apiAddr, "api-addr", "", "listen address for the shared HTTPS API (JSON-RPC + /metrics; overrides [control] addr)")
+	fs.StringVar(&o.apiAddr, "api-addr", "", "listen address for the shared HTTP API (JSON-RPC + /metrics; overrides [control] addr)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -41,7 +42,7 @@ func usage() {
   --config    TOML configuration (ctrlirl_coder schema)
   --pipeline  pipeline template (gst-launch style, terminal appsink name=appsink)
   --scene     JSON scene descriptor (multi-layer compositor)
-  --api-addr  listen address for the shared HTTPS API (e.g. 127.0.0.1:8899)
+  --api-addr  listen address for the shared HTTP API (e.g. 127.0.0.1:8899)
   --dry-run   validate config, scene and pipeline contract, then exit (pure Go)`)
 }
 
@@ -80,17 +81,6 @@ func pipelineContract(text string) (missingMandatory, present []string) {
 		}
 	}
 	return missingMandatory, present
-}
-
-// validatePipelineContract checks the resolved template text against the
-// contract (spec §2). Both --pipeline and the [pipeline] template go through
-// it, dry-run or not (bug H).
-func validatePipelineContract(text string) error {
-	missing, _ := pipelineContract(text)
-	if len(missing) > 0 {
-		return fmt.Errorf("pipeline contract: missing mandatory element(s): %s", strings.Join(missing, ", "))
-	}
-	return nil
 }
 
 // logLevel reads CTRLIRL_LOG_LEVEL (debug|info|warn|error) for the slog

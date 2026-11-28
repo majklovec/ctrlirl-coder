@@ -61,11 +61,11 @@ func TestMockStatsSourceClosed(t *testing.T) {
 }
 
 func TestEncoderUnits(t *testing.T) {
-	if got := BitratePropertyValue("venc_bps", 4_000_000); got != 4_000_000 {
-		t.Fatalf("venc_bps: got %d, want 4000000", got)
+	if got := EncoderUnits("venc_bps"); got != 1 {
+		t.Fatalf("venc_bps: got %d units, want 1 (bit/s)", got)
 	}
-	if got := BitratePropertyValue("venc_kbps", 4_000_000); got != 4000 {
-		t.Fatalf("venc_kbps: got %d, want 4000", got)
+	if got := EncoderUnits("venc_kbps"); got != 1000 {
+		t.Fatalf("venc_kbps: got %d units, want 1000 (kbit/s)", got)
 	}
 }
 

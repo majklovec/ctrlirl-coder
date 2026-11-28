@@ -13,12 +13,6 @@ import (
 	"ctrlirl-coder/internal/scene"
 )
 
-// fakeCDP fakes the Chrome CDP session surface used by pushFrame: the
-// feeder's exit check reads Stopped(); capture is never called here.
-type fakeCDP struct{ stopped chan struct{} }
-
-func (f *fakeCDP) Stopped() <-chan struct{} { return f.stopped }
-
 // newReadyAppSrc builds an appsrc that is FLUSHING (pipeline at READY, as
 // during a scene-switch freeze).
 func newReadyAppSrc(t *testing.T) *gstutil.Pipeline {
@@ -61,14 +55,12 @@ func TestPushFrameSurvivesFlushFreeze(t *testing.T) {
 	b := &BrowserOverlay{
 		BaseLayer: layer.BaseLayer{L: scene.Layer{ID: "browser-red"}},
 		appSrc:    el,
-		stop:      make(chan struct{}),
 	}
-	sess := &fakeCDP{stopped: make(chan struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	done := make(chan bool, 1)
-	go func() { done <- b.pushFrame(ctx, []byte{0x01}, sess) }()
+	go func() { done <- b.pushFrame(ctx, []byte{0x01}) }()
 
 	// Freeze lasts ~600ms: 3+ backoff rounds at the default 200ms pace.
 	time.Sleep(600 * time.Millisecond)

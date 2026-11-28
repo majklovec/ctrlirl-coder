@@ -63,7 +63,7 @@ type CompositorPipeline struct {
 	tapEl      gst.Element // terminal `appsink` the pipeline ends in, nil if absent
 	overlayEl  gst.Element // textoverlay "overlay", nil if absent
 	muxEl      gst.Element // mpegtsmux "mux" (layer audio lands here), nil if absent
-	mixer      gst.Element // shared audiomixer tail head (one audio track total), nil until first audio layer
+	mixer      gst.Element // head of the shared audio tail (liveadder; one audio track total), nil until the first audio layer
 
 	encoderName  string // "venc_bps" | "venc_kbps" | ""
 	bitrateUnits int    // 1 (bps) or 1000 (kbps), from sinks.EncoderUnits

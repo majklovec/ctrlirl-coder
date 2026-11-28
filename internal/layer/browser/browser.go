@@ -2,7 +2,6 @@ package browser
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/go-gst/go-gst/pkg/gst"
 
+	"ctrlirl-coder/internal/gstutil"
 	"ctrlirl-coder/internal/layer"
 	"ctrlirl-coder/internal/scene"
 )
@@ -69,9 +69,8 @@ type BrowserOverlay struct {
 	fps    int
 
 	// Async lifecycle (set in BuildChain).
-	ctx     context.Context
+	ctx     context.Context // cancelled by Close
 	cancel  context.CancelFunc
-	stop    chan struct{}
 	done    chan struct{} // closed when the browser goroutine exits
 	closed  sync.Once
 	started bool
@@ -88,41 +87,35 @@ func NewBrowserOverlay(l scene.Layer) *BrowserOverlay {
 func (b *BrowserOverlay) BuildChain() (*layer.Chain, error) {
 	b.parseConfig()
 
-	fail := func(format string, args ...any) (*layer.Chain, error) {
-		return nil, fmt.Errorf(format, args...)
-	}
-
-	appSrc, err := layer.MakeElement("appsrc", b.L.ID+"-src", map[string]any{
-		"is-live":      true,
-		"do-timestamp": true,
-		// Single frame of latency: at most one buffer is queued and a full
-		// queue drops the OLDEST (leaky-type=2 = downstream), so a slow
-		// downstream tick can never build backlog — the freshest frame
-		// always wins. block=false alone does not drop (it just makes push
-		// fail on overflow), so the leaky type is what bounds the queue.
-		"block":       false,
-		"max-buffers": 1,
-		"leaky-type":  2, // GST_APP_LEAKY_TYPE_DOWNSTREAM
-	})
+	head, err := layer.Build(
+		layer.Spec{
+			Factory: "appsrc", Name: b.L.ID + "-src",
+			Props: map[string]any{
+				"is-live":      true,
+				"do-timestamp": true,
+				// Single frame of latency: at most one buffer is queued and a
+				// full queue drops the OLDEST (leaky-type=2 = downstream), so
+				// a slow downstream tick can never build backlog — the
+				// freshest frame always wins. block=false alone does not drop
+				// (it just makes push fail on overflow), so the leaky type is
+				// what bounds the queue.
+				"block":       false,
+				"max-buffers": 1,
+				"leaky-type":  2, // GST_APP_LEAKY_TYPE_DOWNSTREAM
+			},
+			Caps: fmt.Sprintf("image/png,width=%d,height=%d,framerate=%d/1", b.width, b.height, b.fps),
+		},
+		// pngdec is a static-pad decoder: the chain is static.
+		layer.Spec{Factory: "pngdec", Name: b.L.ID + "-pngdec"},
+	)
 	if err != nil {
-		return fail("layer: %v", err)
+		return nil, err
 	}
-	appSrc.SetObjectProperty("caps", gst.CapsFromString(fmt.Sprintf(
-		"image/png,width=%d,height=%d,framerate=%d/1", b.width, b.height, b.fps)))
-	b.appSrc = appSrc
-
-	dec, err := layer.MakeElement("pngdec", b.L.ID+"-pngdec", nil)
+	chain, err := layer.SurfaceChain(b.L, head...)
 	if err != nil {
-		return fail("layer: %v", err)
+		return nil, err
 	}
-	vfilters, err := layer.VideoFilters(b.L)
-	if err != nil {
-		return fail("layer: %v", err)
-	}
-	tail, err := layer.Tail(b.L)
-	if err != nil {
-		return fail("layer: %v", err)
-	}
+	b.appSrc = head[0]
 
 	// Audio: a per-layer Pulse/PipeWire null sink gives the page's audio a
 	// dedicated monitor to record from. Without a user audio session the
@@ -137,7 +130,6 @@ func (b *BrowserOverlay) BuildChain() (*layer.Chain, error) {
 	}
 
 	b.ctx, b.cancel = context.WithCancel(context.Background())
-	b.stop = make(chan struct{})
 	b.done = make(chan struct{})
 	b.started = true
 	go b.runBrowser()
@@ -145,17 +137,14 @@ func (b *BrowserOverlay) BuildChain() (*layer.Chain, error) {
 	slog.Info("layer: browser overlay",
 		"id", b.L.ID, "url", b.url, "width", b.width, "height", b.height,
 		"fps", b.fps, "audio", b.hasAudio)
-	els := append([]gst.Element{appSrc, dec}, vfilters...)
-	els = append(els, tail...)
-	// DynamicSourceIndex: -1; pngdec is a static pad source, see layer.SurfaceChain.
-	return &layer.Chain{Elements: els, DynamicSourceIndex: -1}, nil
+	return chain, nil
 }
 
-// runBrowser launches Chrome, connects CDP, then runs the two-phase feed:
-// a frame source (the CDP screencast stream when the Chrome build
-// delivers it, else Page.captureScreenshot polling) keeps the latest frame
-// in a box, and a push ticker stamps exactly 1/fps frames onto the appsrc,
-// always the freshest frame.
+// runBrowser is the layer's feeder goroutine: it launches Chrome, connects
+// CDP, and runs the two-phase feed until Close (or Chrome's exit). A frame
+// source (the CDP screencast stream when the Chrome build delivers it, else
+// Page.captureScreenshot polling) keeps the latest frame in a box, and the
+// push loop puts frames onto the appsrc, always the freshest one.
 //
 // Why the stream: headless Chrome's captureScreenshot has a ~50ms floor at
 // 1080p (SwiftShader raster + PNG encode, verified: unchanged by GPU
@@ -163,21 +152,38 @@ func (b *BrowserOverlay) BuildChain() (*layer.Chain, error) {
 // ~20fps — 3:1 frame repeats on a 60fps pipeline, visible as jank. The
 // Page.startScreencast stream delivers PNG (alpha-preserving) frames at
 // vsync cadence, decoupled from the capture round trip, so the content
-// updates at the page's own refresh rate. The push phase keeps the output
-// cadence exactly the target framerate either way, re-pushing the latest
-// frame every tick so the stream never starves the pipeline on a static
-// page. The screencast stream only sends frames when the page repaints, so
-// stream silence is normal; the polling fallback starts only if the stream
-// never delivers a frame at all (a Chrome build where screencast is dead),
-// and the two frame sources never run side by side. Runs until Close.
+// updates at the page's own refresh rate. The screencast stream only sends
+// frames when the page repaints, so stream silence is normal; the polling
+// fallback starts only if the stream never delivers a frame at all (a
+// Chrome build where screencast is dead), and the two frame sources never
+// run side by side.
 func (b *BrowserOverlay) runBrowser() {
 	defer close(b.done)
 	sess, err := newCDPSession(b.ctx, b.url, b.sink, b.width, b.height)
 	if err != nil {
-		slog.Error("layer: failed to launch Chrome", "id", b.L.ID, "err", err)
+		if b.ctx.Err() == nil { // not an error when the layer was closed meanwhile
+			slog.Error("layer: failed to launch Chrome", "id", b.L.ID, "err", err)
+		}
 		return
 	}
 	defer sess.stop()
+
+	// One context for the whole feeder: done when the layer is closed or
+	// Chrome exits. Every loop below watches only this.
+	ctx, cancel := context.WithCancel(b.ctx)
+	pollDone := make(chan struct{})
+	defer func() {
+		cancel()
+		<-pollDone // the poller may be inside a capture call on sess
+	}()
+	go func() {
+		select {
+		case <-sess.Stopped():
+			slog.Info("layer: Chrome exited", "id", b.L.ID)
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 
 	// Surface the render-backend decision so the flags driving the page's
 	// raster are observable. renderflags is the decision (GPU vs
@@ -187,152 +193,154 @@ func (b *BrowserOverlay) runBrowser() {
 	// rasterizer), so it must not be read as the raster backend.
 	slog.Info("layer: browser render backend",
 		"id", b.L.ID, "renderflags", strings.Join(renderBackendFlags(), " "),
-		"webgl", sess.glRenderer(b.ctx))
+		"webgl", sess.glRenderer(ctx))
 
-	interval := time.Second / time.Duration(b.fps)
-	frames := newLatestFrame(b.stop, b.ctx, sess.Stopped())
+	frames := newLatestFrame()
+	b.startFrameSource(ctx, sess, frames, pollDone)
+	if b.hasAudio {
+		go b.routeAudio(ctx)
+	}
 
+	// First frame: wait for one so the appsrc starts with real content —
+	// pngdec needs a frame to negotiate caps.
+	if !frames.waitFirst(ctx) {
+		return
+	}
+	b.pushLoop(ctx, frames)
+}
+
+// interval is one frame period at the layer's framerate.
+func (b *BrowserOverlay) interval() time.Duration {
+	return time.Second / time.Duration(b.fps)
+}
+
+// startFrameSource starts whatever fills frames: the screencast stream, or
+// the captureScreenshot poller (pollLoop, which closes pollDone when it
+// exits) when the stream cannot be started or never delivers.
+func (b *BrowserOverlay) startFrameSource(ctx context.Context, sess *cdpsession, frames *latestFrame, pollDone chan<- struct{}) {
 	// The stream's first frame disarms the startup watchdog. Silence after
 	// that is a static page, not a broken stream.
 	streamStarted := make(chan struct{})
 	var streamStartedOnce sync.Once
 
-	// Screencast frames arrive on the CDP read-loop goroutine; decoding
-	// (~60 KB base64) is cheap and the box keeps only the latest.
-	sess.SetStreamHandler(func(data string, _ int64) {
-		frame, err := base64.StdEncoding.DecodeString(data)
-		if err != nil || len(frame) == 0 {
-			slog.Debug("layer: screencast frame decode failed", "id", b.L.ID, "err", err)
-			return
-		}
+	// Screencast frames arrive decoded on the CDP read-loop goroutine; the
+	// box keeps only the latest.
+	sess.SetStreamHandler(func(frame []byte) {
 		frames.Store(frame)
 		streamStartedOnce.Do(func() { close(streamStarted) })
 	})
 
-	streamed := false
-	streamCtx, streamCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if err := sess.startScreencast(streamCtx); err != nil {
+	startCtx, startCancel := context.WithTimeout(ctx, 5*time.Second)
+	err := sess.startScreencast(startCtx)
+	startCancel()
+	streamed := err == nil
+	if err != nil && ctx.Err() == nil {
 		slog.Warn("layer: CDP screencast unavailable, polling captureScreenshot",
 			"id", b.L.ID, "err", err)
-	} else {
-		streamed = true
 	}
-	streamCancel()
-
 	slog.Info("layer: browser feeder ready (CDP connected)",
 		"id", b.L.ID, "stream", streamed)
-	if b.hasAudio {
-		go b.routeAudio()
-	}
 
-	// Fallback capture: Page.captureScreenshot at up to 1/fps. The
-	// coordinator waits on `poll`; a watchdog start (stream dead on this
-	// build) or the tail probe start (page went static) wakes it, and it
-	// then polls until exit.
-	poll := make(chan struct{}, 1)
-	captureDone := make(chan struct{})
-	go func() {
-		defer close(captureDone)
-		next := time.Now()
-		for {
-			select {
-			case <-poll:
-				for {
-					if frames.exited() {
-						return
-					}
-					data, err := sess.capture(b.ctx)
-					if err != nil {
-						slog.Debug("layer: capture failed", "id", b.L.ID, "err", err)
-						if !frames.sleep(interval) {
-							return
-						}
-						next = time.Now()
-						continue
-					}
-					frames.Store(data)
-					if !frames.advance(&next, interval) {
-						return
-					}
-				}
-			case <-b.stop:
-				return
-			case <-b.ctx.Done():
-				return
-			case <-sess.Stopped():
-				return
-			}
-		}
-	}()
-	// Non-blocking wake: one pending signal is enough.
-	wakePoll := func() {
-		select {
-		case poll <- struct{}{}:
-		default:
-		}
-	}
-
+	// The poller sleeps until woken; one pending wake-up is enough.
+	wake := make(chan struct{}, 1)
+	go b.pollLoop(ctx, sess, frames, wake, pollDone)
 	if !streamed {
-		wakePoll()
-	} else {
-		// Startup-only fallback: wait for the stream's first frame within the
-		// watchdog window. No frame by then means this Chrome build's
-		// Page.startScreencast is dead — fall back to captureScreenshot for
-		// the layer's lifetime. Once the first frame lands the watchdog is
-		// done for good: a static page silences the stream (it only sends on
-		// repaint) and that is NOT a failure. Starting the polling fallback
-		// alongside a working stream tears the feed apart (measured: two
-		// competing frame sources took the 1080p feed from 60 to ~45 fps with
-		// frame skips), so it must never run on a live stream.
-		go func() {
-			select {
-			case <-streamStarted:
-				return
-			case <-time.After(browserStreamWatchdog):
-				slog.Warn("layer: CDP stream never started, falling back to captureScreenshot",
-					"id", b.L.ID)
-				sess.stopScreencast(context.Background())
-				wakePoll()
-			case <-b.stop:
-			case <-b.ctx.Done():
-			case <-sess.Stopped():
-			}
-		}()
-	}
-
-	// First frame: wait for one (bounded by stop/ctx/Chrome exit) so the
-	// appsrc starts with real content — pngdec needs a frame to negotiate
-	// caps.
-	if _, ok := frames.waitFirst(); !ok {
-		<-captureDone
+		wake <- struct{}{}
 		return
 	}
 
-	// Push phase: content-driven cadence, keepalive ticker.
-	//
-	// Every new frame is pushed as it lands (the fres signal), which keeps
-	// the output in phase with the page's own vsync — the screencast stream
-	// is produced on the page's raster cadence. A pure fixed-ticker push
-	// instead runs its own ~60 Hz clock; the two clocks beat against each
-	// other and the ticker sometimes re-pushes the previous frame between
-	// two raster frames, so one content step spans two ticks and the next
-	// spans two frames: a 0-px-then-2x stall-then-teleport beat, visible on
-	// an 8 px/frame line test (measured 0.9% beat pairs pre-fix). Ticker
-	// pushes after the fix only ever re-push the SAME content (keepalive on
-	// a static page, where they are required: a live stream dies if a
-	// single source layer goes silent) and are content-invisible.
-	//
-	// The ticker also bounds the cadence: it skips when a fresh push has
-	// supplied a frame within the interval, so the push rate stays ~1/fps
-	// in total. The appsrc is single-frame (leaky downstream), so a push
-	// costs at most one decode, never backlog.
+	// Startup-only fallback: wait for the stream's first frame within the
+	// watchdog window. No frame by then means this Chrome build's
+	// Page.startScreencast is dead — fall back to captureScreenshot for
+	// the layer's lifetime. Once the first frame lands the watchdog is
+	// done for good: a static page silences the stream (it only sends on
+	// repaint) and that is NOT a failure. Starting the polling fallback
+	// alongside a working stream tears the feed apart (measured: two
+	// competing frame sources took the 1080p feed from 60 to ~45 fps with
+	// frame skips), so it must never run on a live stream.
+	go func() {
+		select {
+		case <-streamStarted:
+		case <-ctx.Done():
+		case <-time.After(browserStreamWatchdog):
+			slog.Warn("layer: CDP stream never started, falling back to captureScreenshot",
+				"id", b.L.ID)
+			sess.stopScreencast(context.Background())
+			wake <- struct{}{}
+		}
+	}()
+}
+
+// pollLoop is the fallback frame source: once woken, it captures
+// Page.captureScreenshot frames at up to one per frame interval until ctx
+// is done.
+func (b *BrowserOverlay) pollLoop(ctx context.Context, sess *cdpsession, frames *latestFrame, wake <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	select {
+	case <-wake:
+	case <-ctx.Done():
+		return
+	}
+	interval := b.interval()
+	next := time.Now()
+	for ctx.Err() == nil {
+		data, err := sess.capture(ctx)
+		if err != nil {
+			slog.Debug("layer: capture failed", "id", b.L.ID, "err", err)
+			if !sleepCtx(ctx, interval) {
+				return
+			}
+			next = time.Now()
+			continue
+		}
+		frames.Store(data)
+		// At most one capture per interval: sleep until the next slot if
+		// ahead, resync if behind (Chrome slower than the target rate —
+		// the normal case for this path).
+		next = next.Add(interval)
+		if wait := time.Until(next); wait <= 0 {
+			next = time.Now()
+		} else if !sleepCtx(ctx, wait) {
+			return
+		}
+	}
+}
+
+// sleepCtx waits d; it reports false when ctx ends first.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// pushLoop is the push phase: content-driven cadence, keepalive ticker.
+//
+// Every new frame is pushed as it lands (the fresh signal), which keeps the
+// output in phase with the page's own vsync — the screencast stream is
+// produced on the page's raster cadence. A pure fixed-ticker push instead
+// runs its own ~60 Hz clock; the two clocks beat against each other and the
+// ticker sometimes re-pushes the previous frame between two raster frames,
+// so one content step spans two ticks and the next spans two frames: a
+// 0-px-then-2x stall-then-teleport beat, visible on an 8 px/frame line test
+// (measured 0.9% beat pairs pre-fix). Ticker pushes only ever re-push the
+// SAME content (keepalive on a static page, where they are required: a live
+// stream dies if a single source layer goes silent) and are
+// content-invisible.
+//
+// The ticker also bounds the cadence: it skips when a fresh push has
+// supplied a frame within the interval, so the push rate stays ~1/fps in
+// total. The appsrc is single-frame (leaky downstream), so a push costs at
+// most one decode, never backlog.
+func (b *BrowserOverlay) pushLoop(ctx context.Context, frames *latestFrame) {
+	interval := b.interval()
 	lastPush := time.Now()
 	pushLatest := func() bool {
-		f, _, ok := frames.Load()
-		if !ok {
-			return true
-		}
-		if !b.pushFrame(b.ctx, f, sess) {
+		if !b.pushFrame(ctx, frames.Load()) {
 			return false
 		}
 		lastPush = time.Now()
@@ -342,145 +350,67 @@ func (b *BrowserOverlay) runBrowser() {
 	defer tick.Stop()
 	for {
 		select {
-		case <-b.stop:
-			<-captureDone
-			return
-		case <-b.ctx.Done():
-			<-captureDone
-			return
-		case <-sess.Stopped():
-			slog.Info("layer: Chrome exited", "id", b.L.ID)
-			<-captureDone
+		case <-ctx.Done():
 			return
 		case <-frames.fresh:
 			if !pushLatest() {
-				<-captureDone
 				return
 			}
 		case <-tick.C:
-			if time.Since(lastPush) < interval {
-				continue
-			}
-			if !pushLatest() {
-				<-captureDone
+			if time.Since(lastPush) >= interval && !pushLatest() {
 				return
 			}
 		}
 	}
 }
 
-// latestFrame keeps the most recent captured frame plus the exit channels
-// of the feeder. Store is called by the frame source (screencast read-loop
-// or polling capture); Load/waitFirst by the push goroutine.
+// latestFrame is a one-slot box holding the most recent captured frame.
+// Store is called by the frame source (screencast read loop or the poller);
+// Load and waitFirst by the push goroutine.
 type latestFrame struct {
-	stop    chan struct{}
-	ctx     context.Context
-	stopped <-chan struct{}
+	mu   sync.Mutex
+	data []byte
 
-	mu    sync.Mutex
-	data  []byte
-	seq   uint64
-	first chan struct{} // closed on the first Store
+	first     chan struct{} // closed on the first Store
+	firstOnce sync.Once
 
 	// fresh is a coalescing "frame arrived" signal for the push goroutine:
-	// cap 1, non-blocking send. A signal lost to coalescing costs at most
-	// one tick — the ticker path re-checks seq and catches up.
-	fresh chan uint64
+	// cap 1, non-blocking send. A signal lost to coalescing costs nothing —
+	// the pending one makes the push loop load the latest frame.
+	fresh chan struct{}
 }
 
-func newLatestFrame(stop chan struct{}, ctx context.Context, stopped <-chan struct{}) *latestFrame {
-	return &latestFrame{stop: stop, ctx: ctx, stopped: stopped, first: make(chan struct{}), fresh: make(chan uint64, 1)}
-}
-
-// exited reports the feeder is done (stop / ctx / Chrome gone).
-func (l *latestFrame) exited() bool {
-	select {
-	case <-l.stop:
-		return true
-	case <-l.ctx.Done():
-		return true
-	case <-l.stopped:
-		return true
-	default:
-		return false
-	}
+func newLatestFrame() *latestFrame {
+	return &latestFrame{first: make(chan struct{}), fresh: make(chan struct{}, 1)}
 }
 
 // Store publishes a new frame and wakes the push goroutine (coalesced).
 func (l *latestFrame) Store(data []byte) {
 	l.mu.Lock()
 	l.data = data
-	l.seq++
-	if l.first != nil {
-		close(l.first)
-		l.first = nil
-	}
 	l.mu.Unlock()
+	l.firstOnce.Do(func() { close(l.first) })
 	select {
-	case l.fresh <- l.seq:
+	case l.fresh <- struct{}{}:
 	default:
 	}
 }
 
-// Load returns the latest frame and its sequence (0, false before the first capture).
-func (l *latestFrame) Load() ([]byte, uint64, bool) {
+// Load returns the latest frame (nil before the first Store).
+func (l *latestFrame) Load() []byte {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.data == nil {
-		return nil, 0, false
-	}
-	return l.data, l.seq, true
+	return l.data
 }
 
-// sleep waits d unless the feeder exits; returns false on exit.
-func (l *latestFrame) sleep(d time.Duration) bool {
-	if d <= 0 {
-		return !l.exited()
-	}
+// waitFirst blocks until the first frame has landed; it reports false when
+// ctx ends first.
+func (l *latestFrame) waitFirst(ctx context.Context) bool {
 	select {
-	case <-l.stop:
-		return false
-	case <-l.ctx.Done():
-		return false
-	case <-l.stopped:
-		return false
-	case <-time.After(d):
+	case <-l.first:
 		return true
-	}
-}
-
-// advance paces the capture loop to at most one capture per interval:
-// sleep until the next slot if ahead, resync if behind (Chrome slower than
-// the target rate — the normal case on this host). Returns false on exit.
-func (l *latestFrame) advance(next *time.Time, interval time.Duration) bool {
-	*next = next.Add(interval)
-	wait := time.Until(*next)
-	if wait <= 0 {
-		*next = time.Now()
-		return !l.exited()
-	}
-	return l.sleep(wait)
-}
-
-// waitFirst blocks until the first capture lands or the feeder exits.
-// It re-checks exit each poll because a capture that fails forever (Chrome
-// dies mid-capture) never closes first.
-func (l *latestFrame) waitFirst() ([]byte, bool) {
-	t := time.NewTimer(time.Millisecond)
-	defer t.Stop()
-	for {
-		select {
-		case <-l.first:
-			l.mu.Lock()
-			data := l.data
-			l.mu.Unlock()
-			return data, data != nil
-		case <-t.C:
-			if l.exited() {
-				return nil, false
-			}
-			t.Reset(time.Millisecond)
-		}
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -492,22 +422,15 @@ func (l *latestFrame) waitFirst() ([]byte, bool) {
 // feeder must outlive the freeze: back off and re-push until the appsrc
 // accepts again. The same frame is re-pushed, so a freeze only costs
 // freshness (max one stale frame after resume), not the stream.
-// Returns false when the feeder must exit (stop / ctx / Chrome gone);
-// true once the frame was pushed (1) or dropped transiently (-1).
-func (b *BrowserOverlay) pushFrame(ctx context.Context, frame []byte, stoppeder interface{ Stopped() <-chan struct{} }) bool {
+// Returns false when the feeder must exit (ctx done); true once the frame
+// was pushed, or dropped on any other flow error.
+func (b *BrowserOverlay) pushFrame(ctx context.Context, frame []byte) bool {
 	for {
-		if n := pushBuffer(b.appSrc, frame); n != 0 {
+		if gstutil.PushBytes(b.appSrc, frame) != gst.FlowFlushing {
 			return true
 		}
-		select {
-		case <-b.stop:
+		if !sleepCtx(ctx, browserFlushBackoff) {
 			return false
-		case <-ctx.Done():
-			return false
-		case <-stoppeder.Stopped():
-			slog.Info("layer: Chrome exited", "id", b.L.ID)
-			return false
-		case <-time.After(browserFlushBackoff):
 		}
 	}
 }
@@ -517,7 +440,7 @@ func (b *BrowserOverlay) pushFrame(ctx context.Context, frame []byte, stoppeder 
 // time (donation alerts) create no sink-input until the first sound, so this
 // keeps trying for the layer's whole lifetime instead of giving up after
 // 15 seconds (best effort: audio stays video-only when this fails).
-func (b *BrowserOverlay) routeAudio() {
+func (b *BrowserOverlay) routeAudio(ctx context.Context) {
 	for {
 		if id := findSinkInputID("chrome", b.sink); id != "" {
 			if err := routeSinkInput(id, b.sink); err != nil {
@@ -527,10 +450,8 @@ func (b *BrowserOverlay) routeAudio() {
 			slog.Info("layer: page audio routed to null sink", "id", b.L.ID, "sink", b.sink)
 			return
 		}
-		select {
-		case <-b.stop:
+		if !sleepCtx(ctx, 2*time.Second) {
 			return
-		case <-time.After(2 * time.Second):
 		}
 	}
 }
@@ -545,31 +466,25 @@ func (b *BrowserOverlay) AudioChain() (*layer.Chain, error) {
 	if !b.hasAudio {
 		return nil, nil
 	}
-	fail := func(format string, args ...any) (*layer.Chain, error) {
-		return nil, fmt.Errorf(format, args...)
-	}
-	src, err := layer.MakeElement("pulsesrc", b.L.ID+"-audsrc", map[string]any{
-		"device": b.sink + ".monitor",
-	})
+	head, err := layer.Build(
+		layer.Spec{Factory: "pulsesrc", Name: b.L.ID + "-audsrc", Props: map[string]any{
+			"device": b.sink + ".monitor",
+		}},
+		layer.Spec{Factory: "audioconvert", Name: b.L.ID + "-audconv"},
+	)
 	if err != nil {
-		return fail("layer: %v", err)
-	}
-	conv, err := layer.MakeElement("audioconvert", b.L.ID+"-audconv", nil)
-	if err != nil {
-		return fail("layer: %v", err)
+		return nil, err
 	}
 	// Audio filters (volume, equalizer, audiodynamic, pitch) sit between the
 	// converter and the tail; they operate on raw PCM, which the
 	// compositor's shared audiomixer then combines with the other layers.
 	// The mixer takes the chains' native (float) format — no capsfilter:
 	// audiomixer sink pads do not accept S16LE and reject a pinned link.
-	afilters, err := layer.AudioFilters(b.L)
+	filters, err := layer.AudioFilters(b.L)
 	if err != nil {
-		return fail("layer: %v", err)
+		return nil, err
 	}
-	els := append([]gst.Element{src, conv}, afilters...)
-	// DynamicSourceIndex: -1; the audio chain has no dynamic pads.
-	return &layer.Chain{Elements: els, DynamicSourceIndex: -1}, nil
+	return layer.StaticChain(append(head, filters...)...), nil
 }
 
 // DefaultProperties returns the compositor-pad properties for this layer.
@@ -592,7 +507,6 @@ func (b *BrowserOverlay) Close() error {
 			return
 		}
 		b.cancel()
-		close(b.stop)
 		<-b.done
 		if b.sinkUp != nil {
 			b.sinkUp()
@@ -608,23 +522,9 @@ func (b *BrowserOverlay) Close() error {
 // legacy "quality" property is ignored (capture is lossless PNG now).
 func (b *BrowserOverlay) parseConfig() {
 	b.url = b.L.Source
-	b.width = intProp(b.L, "width", browserDefaultWidth)
-	b.height = intProp(b.L, "height", browserDefaultHeight)
-	b.fps = intProp(b.L, "framerate", browserDefaultFPS)
-	if b.width <= 0 {
-		b.width = browserDefaultWidth
-	}
-	if b.height <= 0 {
-		b.height = browserDefaultHeight
-	}
-}
-
-// intProp reads a scene property as a positive int, falling back to def.
-func intProp(l scene.Layer, key string, def int) int {
-	if v, ok := l.Properties[key]; ok && v > 0 {
-		return int(v)
-	}
-	return def
+	b.width = layer.IntProp(b.L, "width", browserDefaultWidth)
+	b.height = layer.IntProp(b.L, "height", browserDefaultHeight)
+	b.fps = layer.IntProp(b.L, "framerate", browserDefaultFPS)
 }
 
 // sanitizeSinkID makes a scene layer id safe for a Pulse sink name.

@@ -3,10 +3,10 @@ package text
 import (
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
-
-	"github.com/go-gst/go-gst/pkg/gst"
 
 	"ctrlirl-coder/internal/layer"
 	"ctrlirl-coder/internal/scene"
@@ -60,34 +60,27 @@ func (t *TextOverlay) BuildChain() (*layer.Chain, error) {
 		props["text"] = t.L.Text
 	}
 
-	surface, err := layer.MakeElement("videotestsrc", t.L.ID+"-surface", map[string]any{
-		"is-live": true,
-		"pattern": int32(2),
-	})
-	if err != nil {
-		return nil, err
-	}
-	surfaceCaps, err := layer.MakeElement("capsfilter", t.L.ID+"-surface-caps", nil)
-	if err != nil {
-		return nil, err
-	}
-	surfaceCaps.SetObjectProperty("caps", gst.CapsFromString(
-		fmt.Sprintf("video/x-raw,format=BGRA,width=%d,height=%d,framerate=%d/1", textSurfaceW, textSurfaceH, textSurfaceFPS)))
-	alpha, err := layer.MakeElement("alpha", t.L.ID+"-alpha", map[string]any{
-		"method": int32(0),
-		"alpha":  0.0,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	to, err := layer.MakeElement("textoverlay", t.L.ID+"-text", props)
+	id := t.L.ID
+	head, err := layer.Build(
+		// A transparent surface for the text to be painted on.
+		layer.Spec{Factory: "videotestsrc", Name: id + "-surface", Props: map[string]any{
+			"is-live": true,
+			"pattern": int32(2),
+		}},
+		layer.Spec{Factory: "capsfilter", Name: id + "-surface-caps", Caps: fmt.Sprintf(
+			"video/x-raw,format=BGRA,width=%d,height=%d,framerate=%d/1", textSurfaceW, textSurfaceH, textSurfaceFPS)},
+		layer.Spec{Factory: "alpha", Name: id + "-alpha", Props: map[string]any{
+			"method": int32(0),
+			"alpha":  0.0,
+		}},
+		layer.Spec{Factory: "textoverlay", Name: id + "-text", Props: props},
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	slog.Info("layer: text overlay", "id", t.L.ID, "text", t.L.Text, "options", props)
-	return layer.SurfaceChain(t.L, surface, surfaceCaps, alpha, to)
+	slog.Info("layer: text overlay", "id", id, "text", t.L.Text, "options", props)
+	return layer.SurfaceChain(t.L, head...)
 }
 
 // DefaultProperties returns the scene properties. width/height default to 0
@@ -125,42 +118,34 @@ func (t *TextOverlay) DefaultProperties() map[string]float64 {
 //
 // The scene uses these names on purpose so that a scene reads like the
 // element's property list (gst-inspect-1.0 textoverlay).
-var textOptions = map[string]textOptKind{
-	"font-desc": textOptString{},
+var textOptions = map[string]func(value string) (any, error){
+	"font-desc": optString,
 
-	"color":         textOptARGB{},
-	"outline-color": textOptARGB{},
+	"color":         optARGB,
+	"outline-color": optARGB,
 
-	"shading-value": textOptUInt{},
-	"xpad":          textOptUInt{},
-	"ypad":          textOptUInt{},
+	"shading-value": optUint,
+	"xpad":          optUint,
+	"ypad":          optUint,
 
-	"deltax": textOptInt{},
-	"deltay": textOptInt{},
+	"deltax": optInt,
+	"deltay": optInt,
 
-	"auto-resize":       textOptBool{},
-	"draw-outline":      textOptBool{},
-	"draw-shadow":       textOptBool{},
-	"shaded-background": textOptBool{},
+	"auto-resize":       optBool,
+	"draw-outline":      optBool,
+	"draw-shadow":       optBool,
+	"shaded-background": optBool,
 
-	"halignment":     textOptEnum{halignValues},
-	"valignment":     textOptEnum{valignValues},
-	"line-alignment": textOptEnum{lineAlignValues},
-	"wrap-mode":      textOptEnum{wrapModeValues},
-	"scale-mode":     textOptEnum{scaleModeValues},
+	"halignment":     optEnum(halignValues),
+	"valignment":     optEnum(valignValues),
+	"line-alignment": optEnum(lineAlignValues),
+	"wrap-mode":      optEnum(wrapModeValues),
+	"scale-mode":     optEnum(scaleModeValues),
 }
 
-type textOptKind interface {
-	convert(value string) (any, error)
-}
+func optString(v string) (any, error) { return v, nil }
 
-type textOptString struct{}
-
-func (textOptString) convert(v string) (any, error) { return v, nil }
-
-type textOptBool struct{}
-
-func (textOptBool) convert(v string) (any, error) {
+func optBool(v string) (any, error) {
 	b, err := strconv.ParseBool(strings.TrimSpace(v))
 	if err != nil {
 		return nil, fmt.Errorf("not a bool: %q", v)
@@ -168,9 +153,7 @@ func (textOptBool) convert(v string) (any, error) {
 	return b, nil
 }
 
-type textOptInt struct{}
-
-func (textOptInt) convert(v string) (any, error) {
+func optInt(v string) (any, error) {
 	n, err := strconv.ParseInt(strings.TrimSpace(v), 0, 32)
 	if err != nil {
 		return nil, fmt.Errorf("not an integer: %q", v)
@@ -178,9 +161,7 @@ func (textOptInt) convert(v string) (any, error) {
 	return int32(n), nil
 }
 
-type textOptUInt struct{}
-
-func (textOptUInt) convert(v string) (any, error) {
+func optUint(v string) (any, error) {
 	n, err := strconv.ParseUint(strings.TrimSpace(v), 0, 32)
 	if err != nil {
 		return nil, fmt.Errorf("not an unsigned integer: %q", v)
@@ -188,12 +169,10 @@ func (textOptUInt) convert(v string) (any, error) {
 	return uint32(n), nil
 }
 
-// textOptARGB accepts a big-endian ARGB color as "#AARRGGBB", "AARRGGBB",
+// optARGB accepts a big-endian ARGB color as "#AARRGGBB", "AARRGGBB",
 // "0xAARRGGBB" (or a decimal), and a bare "#RRGGBB"/"RRGGBB" (alpha forced
 // to opaque).
-type textOptARGB struct{}
-
-func (textOptARGB) convert(v string) (any, error) {
+func optARGB(v string) (any, error) {
 	s := strings.TrimPrefix(strings.TrimSpace(v), "#")
 	if len(s) == 6 { // RRGGBB → opaque ARGB
 		s = "FF" + s
@@ -208,27 +187,23 @@ func (textOptARGB) convert(v string) (any, error) {
 	return uint32(n), nil
 }
 
-type textOptEnum struct {
-	names map[string]int
+// optEnum accepts a GEnum value by number or by one of names.
+func optEnum(names map[string]int) func(string) (any, error) {
+	return func(v string) (any, error) {
+		s := strings.TrimSpace(v)
+		if n, err := strconv.ParseInt(s, 0, 32); err == nil {
+			return int32(n), nil
+		}
+		if n, ok := names[strings.ToLower(s)]; ok {
+			return int32(n), nil
+		}
+		return nil, fmt.Errorf("unknown enum value %q (names: %s)", v, sortedKeys(names, "|"))
+	}
 }
 
-func (e textOptEnum) convert(v string) (any, error) {
-	s := strings.TrimSpace(v)
-	if n, err := strconv.ParseInt(s, 0, 32); err == nil {
-		return int32(n), nil
-	}
-	if n, ok := e.names[strings.ToLower(s)]; ok {
-		return int32(n), nil
-	}
-	return nil, fmt.Errorf("unknown enum value %q (names: %s)", v, enumNames(e.names))
-}
-
-func enumNames(m map[string]int) string {
-	names := make([]string, 0, len(m))
-	for n := range m {
-		names = append(names, n)
-	}
-	return strings.Join(names, "|")
+// sortedKeys lists a map's keys in order, for stable error messages.
+func sortedKeys[V any](m map[string]V, sep string) string {
+	return strings.Join(slices.Sorted(maps.Keys(m)), sep)
 }
 
 // GstBaseTextOverlayHAlign.
@@ -252,23 +227,15 @@ var scaleModeValues = map[string]int{"none": 0, "par": 1, "display": 2, "user": 
 func parseTextOptions(opts map[string]string) (map[string]any, error) {
 	out := make(map[string]any, len(opts))
 	for k, v := range opts {
-		conv, ok := textOptions[k]
+		convert, ok := textOptions[k]
 		if !ok {
-			return nil, fmt.Errorf("unknown text option %q (known: %s)", k, knownTextOptions())
+			return nil, fmt.Errorf("unknown text option %q (known: %s)", k, sortedKeys(textOptions, " "))
 		}
-		val, err := conv.convert(v)
+		val, err := convert(v)
 		if err != nil {
 			return nil, fmt.Errorf("text option %q: %w", k, err)
 		}
 		out[k] = val
 	}
 	return out, nil
-}
-
-func knownTextOptions() string {
-	names := make([]string, 0, len(textOptions))
-	for k := range textOptions {
-		names = append(names, k)
-	}
-	return strings.Join(names, " ")
 }

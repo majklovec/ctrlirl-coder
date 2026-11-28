@@ -230,16 +230,29 @@ func BuildACK(acks ...int32) []byte {
 // ParseACKs returns the acknowledged sequence numbers in an SRTLA ACK packet.
 // The 4-byte header is skipped, word by word, per the reference.
 func ParseACKs(b []byte) []int32 {
-	if Type(b) != TypeACK || len(b) < 4 {
+	if Type(b) != TypeACK {
 		return nil
 	}
-	n := (len(b) - 4) / 4
-	acks := make([]int32, 0, n)
-	for i := 0; i < n; i++ {
-		acks = append(acks, int32(binary.BigEndian.Uint32(b[4+4*i:])))
+	p := ackSeqs(b)
+	acks := make([]int32, 0, len(p)/4)
+	for ; len(p) >= 4; p = p[4:] {
+		acks = append(acks, seqAt(p))
 	}
 	return acks
 }
+
+// ackSeqs is the sequence-number list of an SRTLA ACK packet: what follows
+// the 4-byte header, 4 bytes per acknowledged packet. The feedback path
+// walks it in place (seqAt) instead of allocating a slice per ACK packet.
+func ackSeqs(b []byte) []byte {
+	if len(b) < 4 {
+		return nil
+	}
+	return b[4:]
+}
+
+// seqAt reads the big-endian sequence number at the start of p.
+func seqAt(p []byte) int32 { return int32(binary.BigEndian.Uint32(p)) }
 
 // SRTAckLast returns the cumulative "last acked sequence" from an SRT ACK
 // packet, stored big endian right after the 16-byte SRT header.

@@ -150,3 +150,18 @@ func TestBuildFiltersNone(t *testing.T) {
 		t.Fatalf("no filters should yield no elements, got %d", len(a))
 	}
 }
+
+func TestIntProp(t *testing.T) {
+	l := scene.Layer{Properties: map[string]float64{"framerate": 60, "quality": 0}}
+	if got := IntProp(l, "framerate", 30); got != 60 {
+		t.Errorf("IntProp framerate = %d, want 60", got)
+	}
+	// quality=0 is not > 0, so it falls back to the default.
+	if got := IntProp(l, "quality", 75); got != 75 {
+		t.Errorf("IntProp quality = %d, want 75 (0 falls back)", got)
+	}
+	// Missing key falls back.
+	if got := IntProp(l, "width", 1280); got != 1280 {
+		t.Errorf("IntProp width = %d, want 1280", got)
+	}
+}

@@ -117,25 +117,6 @@ func TestValidateErrors(t *testing.T) {
 	}
 }
 
-func TestReloadDiff(t *testing.T) {
-	p := writeTemp(t, "[general]\nmin_bitrate=500\nmax_bitrate=6000\n")
-	prev, err := Load(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(p, []byte("[general]\nmin_bitrate=700\nmax_bitrate=8000\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	older, next, err := prev.Reload(p)
-	if err != nil {
-		t.Fatalf("Reload: %v", err)
-	}
-	if older.General.MinBitrateKbps != 500 || next.General.MinBitrateKbps != 700 {
-		t.Errorf("reload diff wrong: prev=%d next=%d",
-			older.General.MinBitrateKbps, next.General.MinBitrateKbps)
-	}
-}
-
 func TestLoadMissingFile(t *testing.T) {
 	if _, err := Load("/nonexistent/nope.toml"); err == nil {
 		t.Fatalf("expected error for missing file")

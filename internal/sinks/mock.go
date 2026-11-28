@@ -51,20 +51,6 @@ func NewMockStatsSourceWith(p MockProfile) *MockStatsSource {
 	return &MockStatsSource{profile: p, interval: time.Second}
 }
 
-// SetProfile atomically replaces the reported statistics profile.
-func (m *MockStatsSource) SetProfile(p MockProfile) {
-	m.mu.Lock()
-	m.profile = p
-	m.mu.Unlock()
-}
-
-// Profile returns a copy of the current profile.
-func (m *MockStatsSource) Profile() MockProfile {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.profile
-}
-
 // SetInterval controls how fast the mock's monotonic clock advances between
 // Stats() calls. The default is one second; tests shrink it to exercise the
 // AIMD pacing logic.
