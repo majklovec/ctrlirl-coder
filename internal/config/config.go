@@ -115,16 +115,6 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// Reload re-reads the file from disk and returns (prev, next) so callers can
-// compute a diff-friendly snapshot. Both pointers are fully populated.
-func (c *Config) Reload(path string) (prev, next *Config, err error) {
-	nx, e := Load(path)
-	if e != nil {
-		return c, nil, e
-	}
-	return c, nx, nil
-}
-
 func (c *Config) applyDefaults() {
 	if c.Sink == "" {
 		c.Sink = SinkSRT

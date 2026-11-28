@@ -23,7 +23,6 @@ type Config struct {
 type Server struct {
 	srv  *http.Server
 	ln   net.Listener
-	mux  *http.ServeMux
 	addr string
 }
 
@@ -51,7 +50,6 @@ func New(cfg Config, handlers map[string]http.Handler) (*Server, error) {
 	return &Server{
 		srv:  &http.Server{Handler: mux},
 		ln:   ln,
-		mux:  mux,
 		addr: ln.Addr().String(),
 	}, nil
 }
@@ -76,6 +74,3 @@ func (s *Server) Stop() error {
 
 // Addr returns the bound listener address (useful when bound to :0).
 func (s *Server) Addr() string { return s.addr }
-
-// Mux exposes the endpoint router (tests).
-func (s *Server) Mux() *http.ServeMux { return s.mux }

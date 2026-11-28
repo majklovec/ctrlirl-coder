@@ -365,12 +365,6 @@ func (p *Puller) LastFrameAge() time.Duration {
 	return time.Duration(int64(nowMS())-last) * time.Millisecond
 }
 
-// Stop is a no-op in the pull model: nothing can block the streaming thread
-// (the pull happens on the Go drain goroutine). Kept so the ordered teardown
-// in run_gst.go is unchanged — Run exits when ctx is cancelled and the
-// frozen appsink's pull returns NULL.
-func (p *Puller) Stop() {}
-
 // Detach is a no-op safety seam kept for the ordered teardown in run_gst.go
 // (no signal to disconnect in the pull model — the element is owned by the
 // pipeline and unrefed with it).

@@ -114,26 +114,6 @@ func TestSRTAckClearsAllBelow(t *testing.T) {
 	}
 }
 
-func TestNAKRangeAppliesAll(t *testing.T) {
-	fc := &fakeClock{t: time.Unix(1_000_000, 0)}
-	u := NewUplink(1, "127.0.0.1", testCfg(), fc.Now)
-	u.NoteSent(5)
-	u.NoteSent(6)
-	u.NoteSent(7)
-	w0 := u.Window()
-	applied := u.RegisterNAKRange(5, 7)
-	if applied != 3 {
-		t.Fatalf("RegisterNAKRange applied = %d, want 3", applied)
-	}
-	if got := u.Window(); got != w0-WindowDecr*3 {
-		t.Fatalf("Window after range = %d, want %d", got, w0-WindowDecr*3)
-	}
-	// A wrap-around run (first > last) is ignored.
-	if got := u.RegisterNAKRange(10, 5); got != 0 {
-		t.Fatalf("RegisterNAKRange wrap = %d, want 0", got)
-	}
-}
-
 func TestTimeout(t *testing.T) {
 	fc := &fakeClock{t: time.Unix(1_000_000, 0)}
 	cfg := testCfg()
@@ -164,9 +144,11 @@ func TestMarkDeadForcesTimeout(t *testing.T) {
 		t.Fatalf("MarkDead should force timeout")
 	}
 	u.Reset()
-	if u.TimedOut() && !fc.t.IsZero() {
-		// After Reset with no activity it is timed out for lack of traffic,
-		// which is acceptable; the important part is the flag cleared.
+	// Reset also clears the receive timestamp, so the uplink reads as timed
+	// out until traffic returns; the forced-dead flag itself must be gone.
+	u.TouchRecv()
+	if u.TimedOut() {
+		t.Fatalf("Reset should clear the forced timeout")
 	}
 }
 

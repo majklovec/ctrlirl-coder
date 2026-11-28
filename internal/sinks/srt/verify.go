@@ -40,11 +40,6 @@ var (
 	verifyErr  error
 )
 
-// srtBuildIdentity reports the embedded CERALIVE build metadata.
-func srtBuildIdentity() (libSHA256, sourceSHA string) {
-	return ceraliveLibSHA256, ceraliveSourceSHA
-}
-
 // verifyLoadedSRT confirms the mapped libsrt is the embedded CERALIVE fork.
 // It runs at most once per process; the result is cached.
 func verifyLoadedSRT() error {

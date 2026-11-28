@@ -39,8 +39,6 @@ const (
 	FeedbackSrtlaAck
 	// FeedbackSrtNak is one lost sequence from an SRT NAK (0x8003).
 	FeedbackSrtNak
-	// FeedbackSrtNakRange is a full NAK run; sn carries the range start.
-	FeedbackSrtNakRange
 )
 
 // Enhanced mode tuning (spec 14.3.3).
@@ -96,8 +94,6 @@ func (s *classicScheduler) Feedback(uplink *Uplink, sn int32, kind FeedbackKind,
 		uplink.RegisterACK(sn)
 	case FeedbackSrtNak:
 		uplink.RegisterNAK(sn)
-	case FeedbackSrtNakRange:
-		uplink.RegisterNAKRange(sn, sn)
 	}
 }
 
@@ -107,7 +103,6 @@ type enhancedScheduler struct {
 	// hyst holds the previous Select outcome so a trailing uplink within
 	// 10% sticks; the window map is per-uplink by pointer identity.
 	mu       sync.Mutex
-	hyst     int
 	hystIdx  int
 	log      *slog.Logger
 	lastNak  map[*Uplink]time.Time
@@ -145,7 +140,7 @@ func (s *enhancedScheduler) Select(uplinks []*Uplink, now time.Time) int {
 			return s.hystIdx
 		}
 	}
-	s.hystIdx, s.hyst = best, best
+	s.hystIdx = best
 	return best
 }
 
@@ -211,9 +206,6 @@ func (s *enhancedScheduler) Feedback(uplink *Uplink, sn int32, kind FeedbackKind
 		uplink.RegisterACK(sn)
 	case FeedbackSrtNak:
 		uplink.RegisterNAK(sn)
-		s.lastNak[uplink] = now
-	case FeedbackSrtNakRange:
-		uplink.RegisterNAKRange(sn, sn)
 		s.lastNak[uplink] = now
 	}
 	if kind == FeedbackSrtAck || kind == FeedbackSrtlaAck {

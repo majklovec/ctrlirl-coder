@@ -11,7 +11,6 @@
 package testcode
 
 import (
-	"errors"
 	"fmt"
 )
 
@@ -565,91 +564,6 @@ func (m *qrMatrix) penalty() int {
 	}
 	percent := dark * 100 / (m.size * m.size)
 	return score + 10*(absInt(percent-50)/5)
-}
-
-// qrDecodeData is the inverse of qrEncode used by the tests: it reads the
-// format info of an encoded matrix, unmasks the data region, and repackets
-// the codewords in placement order.
-func qrDecodeData(size int, mod []bool) (mask int, dataCw []byte, err error) {
-	spec, ok := qrSpecForSize(size)
-	if !ok {
-		return 0, nil, fmt.Errorf("qr: no version for matrix size %d", size)
-	}
-	m := newQRMatrix(spec)
-
-	var f uint32
-	for i, p := range qrFormatCells(size, false) {
-		if mod[p[0]*size+p[1]] {
-			f |= 1 << (14 - i)
-		}
-	}
-	data := f ^ qrFormatXorMask
-	if data>>13 != 0 { // the 2 MSB of the un-XORed word are the level code: M = 00
-		return 0, nil, errors.New("qr: format bits not level M")
-	}
-	mask = int(data >> 10 & 0x7)
-
-	for y := 0; y < size; y++ {
-		for x := 0; x < size; x++ {
-			if m.fun[y][x] {
-				continue
-			}
-			v := mod[y*size+x]
-			if qrMaskHit(mask, x, y) {
-				v = !v
-			}
-			m.mod[y][x] = v
-		}
-	}
-
-	var bits []bool
-	up := true
-	for col := size - 1; col > 0; col -= 2 {
-		if col == 6 {
-			col--
-		}
-		var rows []int
-		if up {
-			for y := size - 1; y >= 0; y-- {
-				rows = append(rows, y)
-			}
-		} else {
-			for y := 0; y < size; y++ {
-				rows = append(rows, y)
-			}
-		}
-		up = !up
-		for _, y := range rows {
-			if x := col; !m.fun[y][x] {
-				bits = append(bits, m.mod[y][x])
-			}
-			if x := col - 1; x >= 0 && !m.fun[y][x] {
-				bits = append(bits, m.mod[y][x])
-			}
-		}
-	}
-	dataCw = make([]byte, len(bits)/8)
-	for i := range dataCw {
-		var acc byte
-		for j := 0; j < 8; j++ {
-			acc <<= 1
-			if bits[i*8+j] {
-				acc |= 1
-			}
-		}
-		dataCw[i] = acc
-	}
-	return mask, dataCw, nil
-}
-
-// qrSpecForSize maps a matrix dimension back to its version spec.
-func qrSpecForSize(size int) (qrVersionSpec, bool) {
-	for _, s := range qrVersions {
-		if s.size == size {
-			return s, true
-		}
-	}
-	return qrVersionSpec{}, false
 }
 
 // absInt is the small integer absolute value.

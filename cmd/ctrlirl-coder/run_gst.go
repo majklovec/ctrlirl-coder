@@ -83,20 +83,15 @@ func run(o *options) error {
 
 	// Single ordered teardown on every exit path. The order is critical:
 	//
-	//  1. cancel the data path (stops the ring consumer),
-	//  2. puller.Stop() so a streaming-thread handoff blocked on a now-full
-	//     ring drops and returns instead of blocking — the freeze below needs
-	//     that thread to advance,
-	//  3. cp.Stop() freeze the pipeline (SetState NULL stops the streaming
-	//     thread),
-	//  4. puller.Detach() unref the tap element — only safe AFTER the freeze,
-	//     since unrefing a live element while PLAYING deadlocks,
-	//  5. client.Close() last, so no in-flight write races the unref.
+	//  1. cancel the data path: the drain goroutine stops at its next loop
+	//     turn,
+	//  2. cp.Stop() freezes the pipeline (SetState NULL stops the streaming
+	//     thread and makes a drain blocked in the appsink pull return),
+	//  3. puller.Detach() drops the appsink reference — only AFTER the
+	//     freeze, since releasing a live element while PLAYING deadlocks,
+	//  4. client.Close() last, so no in-flight write races the teardown.
 	defer func() {
 		cancel()
-		if puller != nil {
-			puller.Stop()
-		}
 		if err := cp.Stop(); err != nil {
 			slog.Error("pipeline stop", "err", err)
 		}

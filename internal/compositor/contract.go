@@ -121,10 +121,6 @@ func (cp *CompositorPipeline) HasTap() bool { return cp.tapEl != nil }
 // ends in) so the run path can attach the puller. Nil if the tap is absent.
 func (cp *CompositorPipeline) TapElement() gst.Element { return cp.tapEl }
 
-// EncoderName returns the discovered encoder element name ("", "venc_bps",
-// or "venc_kbps").
-func (cp *CompositorPipeline) EncoderName() string { return cp.encoderName }
-
 // SetBitrate sets the encoder's bitrate property in the cached units
 // (bps for venc_bps, kbps for venc_kbps — spec §7.4). It is a command, so it
 // is safe to call from the controller goroutine.
@@ -176,6 +172,3 @@ func (cp *CompositorPipeline) SetOverlayText(text string) {
 	stored := text
 	cp.lastOverlayText.Store(&stored)
 }
-
-// Pipeline exposes the typed pipeline handle (read-only intent).
-func (cp *CompositorPipeline) Pipeline() *gstutil.Pipeline { return cp.pipeline }

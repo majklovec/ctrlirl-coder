@@ -17,7 +17,6 @@ const (
 	WindowMult  = 1000
 	WindowDecr  = 100 // per NAKed packet
 	WindowIncr  = 30  // per ACK with a near-full backlog (minus 1 in the reference)
-	IdleKeepMS  = 1000
 	MaxNAKEpoch = 10000
 )
 
@@ -55,11 +54,10 @@ type Uplink struct {
 	lastSent   time.Time
 	dead       bool // force-timeout flag (send failure / housekeeping)
 	regDone    bool
-	broadcast  time.Time // REG2 (re)broadcast deadline; zero = not pending
-	weight     float64   // hysteresis-smoothed enhanced score
-	rttMs      uint32    // last measured RTT (0 = unknown → no penalty)
-	nakBurst   [4]int32  // NAK counts within the last four 1s slots
-	nakBurstAt int64     // seconds the nakBurst epoch maps to
+	weight     float64  // hysteresis-smoothed enhanced score
+	rttMs      uint32   // last measured RTT (0 = unknown → no penalty)
+	nakBurst   [4]int32 // NAK counts within the last four 1s slots
+	nakBurstAt int64    // seconds the nakBurst epoch maps to
 }
 
 // NewUplink builds an unconnected uplink. ip is the local address a
@@ -199,22 +197,6 @@ func (u *Uplink) RegDone() {
 	u.mu.Unlock()
 }
 
-// BroadcastDue reports whether this uplink is the pending REG1/REG2 path
-// before the deadline (reference: housekeeping resends REG1 on the pending
-// connection while the REG2 window is open).
-func (u *Uplink) BroadcastDue() bool {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	return !u.broadcast.IsZero() && u.now().Before(u.broadcast)
-}
-
-// SetBroadcast records the REG2 (re)broadcast deadline.
-func (u *Uplink) SetBroadcast(t time.Time) {
-	u.mu.Lock()
-	u.broadcast = t
-	u.mu.Unlock()
-}
-
 // TimedOut reports whether no packet has arrived within the configured
 // connection timeout (the reference's CONN_TIMEOUT gate).
 func (u *Uplink) TimedOut() bool {
@@ -336,32 +318,6 @@ func (u *Uplink) RegisterNAK(sn int32) bool {
 	found := u.registerNAK(sn)
 	u.noteNAK()
 	return found
-}
-
-// registerNAKRange applies a SRT NAK range run, capping the expansion.
-func (u *Uplink) registerNAKRange(first, last int32) int {
-	applied := 0
-	for sn := first; sn <= last && applied < MaxNAKEpoch; sn++ {
-		if u.registerNAK(sn) {
-			applied++
-		}
-	}
-	for i := 0; i < applied && i < MaxNAKEpoch; i++ {
-		u.noteNAK()
-	}
-	return applied
-}
-
-// RegisterNAKRange applies all lost sequences in [first,last] and returns
-// how many were NAKed against the ring. An increasing run that spans a
-// sequence wrap is ignored.
-func (u *Uplink) RegisterNAKRange(first, last int32) int {
-	if first > last {
-		return 0
-	}
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	return u.registerNAKRange(first, last)
 }
 
 // noteNAK counts a NAK in the 1-second rolling burst window (the enhanced

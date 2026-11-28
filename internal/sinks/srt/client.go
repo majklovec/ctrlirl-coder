@@ -26,10 +26,6 @@ import (
 	"github.com/haivision/srtgo"
 )
 
-// MaxLatencyMs is the largest SRT latency we allow; beyond it the encoder
-// buffer would grow without bound. Clamped in config validation.
-const MaxLatencyMs = 10_000
-
 // writePollTimeout bounds a single *attempt* of the SRT Write. In non-blocking
 // mode srtgo's Write waits on this poll timeout before returning EAsyncSND
 // (send buffer not ready). 120 ms matches the default SRT latency and is the
@@ -345,9 +341,6 @@ func (c *Client) Stats() (sinks.Stats, error) {
 
 // Connected reports whether the link is currently up.
 func (c *Client) Connected() bool { return c.sock.Load() != nil }
-
-// LatencyMs returns the configured SRT latency.
-func (c *Client) LatencyMs() int { return c.cfg.LatencyMs }
 
 // Close releases the socket and stops housekeeping. Safe to call more than
 // once.
