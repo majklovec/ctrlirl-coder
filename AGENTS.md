@@ -29,7 +29,7 @@ Smoke test without receiver: `./bin/ctrlirl-coder-linux-amd64 --config config.to
 
 Enforced at startup; breaking them silently kills streaming:
 
-1. **`appsink name=appsink` is mandatory** — terminal element, drained by Go. There is no `srtsink`; SRT is a Go-owned socket. `drop=true` is forced.
+1. **`appsink name=appsink` is mandatory** — terminal element, drained by Go. There is no `srtsink`; SRT is a Go-owned socket. `drop=false` is forced (the paced drain back-pressures VOD sources; see IMPLEMENTATION.md §2.5).
 2. **Encoder named `venc_bps` or `venc_kbps`** — suffix declares units. `x264enc` → `venc_kbps`. This fixes a latent C bug (original set a nonexistent `bps` prop). Do not revert.
 3. **Annex-B before appsink:**
 

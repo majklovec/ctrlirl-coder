@@ -81,11 +81,14 @@ Consequences (a revision _back to_ the original appsink path, see the change log
   (`Stats()` over the live socket) **and** `Applier`; `MockStatsSource` remains for pure-Go tests.
 - **The terminal is `appsink name=appsink`** (mandatory) — `libgstreamer-app` (dev + runtime) is
   a build/runtime prerequisite, matching the original tool. `contract.go` verifies the element
-  is an `appsink` (GType) and forces `drop=true` so a stalled SRT sender back-pressures by
-  dropping frames instead of wedging the pipeline.
+  is an `appsink` (GType) and forces `drop=false` + `max-buffers=600` (since 2026-11-25; it was
+  `drop=true` before): the Go drain is the consumer, and its back-pressure is what holds a VOD
+  source to real time (§2.5, change log 2026-11-25).
 - **`libsrt` is a native library wrapped by the `haivision/srtgo` cgo module** (not a GStreamer plugin). The build links the **CERALIVE fork** bundle (deviations #8/#10): `scripts/build-ceralive-srt.sh` produces `lib/libsrt.so.1.5` + `include/srt/*` + `build.json`, and the app links `-L<bundle>/lib -lsrt -Wl,-rpath,$ORIGIN` with the lib SHA-256 embedded via ldflags.
-- **`drop=true` is required** on the `appsink` — set authoritatively in `contract.go`. Without
-  it a full appsink back-pressures the whole pipeline when the socket stalls.
+- **`drop` on the `appsink` is set authoritatively in `contract.go`** (`false`): a full appsink
+  back-pressures the pipeline. That is intended for VOD sources and means a stalled SRT send
+  stalls a live pipeline too — the send path bounds each write (`writeBudget`, 400 ms) and
+  drops the batch instead of blocking for longer.
 
 ### 2.3 SRT statistics: from the live socket (`srtgo`), throughput measured on the write path
 
@@ -169,22 +172,26 @@ text_overlay.go`); the `color`/`outline-color` properties are big-endian
     - Layers attach while the pipeline is in `NULL` and the appsrc rejects
       pushes there, so the pusher retries with backoff until the first
       `FlowOK` and exits on `FlowFlushing` after it has started.
-- **The terminal `appsink` needs `drop=true`** (set authoritatively in `compositor.checkContract`)
-  (go-gst v1.4.1 has no `SetBoolProperty`; `SetObjectProperty` is the inherited setter). Without
-  it a full appsink back-pressures the whole pipeline when the SRT socket stalls, freezing
-  encoding — the pipeline "works" but data never reaches the receiver.
+- **The terminal `appsink`'s `drop` is set in `compositor.checkContract`** (go-gst v1.4.1 has no
+  `SetBoolProperty`; `SetObjectProperty` is the inherited setter). It was `drop=true` when this
+  section was written and is `drop=false` since the VOD pacing work (change log 2026-11-25).
 - **Text-overlay detection** uses `Element.GoValueType()` against the factory type, because the
   v1.4.1 factory metadata (`klasses`/`media-type`) comes back empty and `GetMetadataKeys()`
   crashes.
 
 ### 2.5 Byte extraction: pull loop on the terminal `appsink` (history: why the cgo callback ring deadlocked)
 
-**Current model (matches `ctrlirl_coder`/`belacoder` verbatim):** `internal/gstpull` pulls the
-encoded frames off the terminal `appsink` with **`gst_app_sink_pull_sample`** (cgo to
-`libgstreamer-app`) on a **dedicated Go goroutine** (`Run`). Each iteration: pull a sample
-(blocking until the producer has one), map+copy its buffer bytes, unref the sample, then hand the
-bytes to the `send` callback (`srt.Client.Write`). No callback, no ring, no channel — the pull is
-the drain. The pull goroutine is a normal Go citizen, so it may block on the SRT write without
+**Current model (the `ctrlirl_coder`/`belacoder` data path):** `internal/gstpull` pulls the
+encoded bytes off the terminal `appsink` with **`gst_app_sink_pull_sample`** (cgo to
+`libgstreamer-app`) on a **dedicated Go goroutine** (`Run`). The terminal `mpegtsmux` emits one
+188-byte TS packet per buffer (~4,400 buffers/s at 6 Mbit/s), so the drain works in batches:
+one C call (`gstpull_drain`) blocks for the first buffer, then keeps taking buffers
+(`gst_app_sink_try_pull_sample`) and copies them straight into a reused Go buffer until that is
+full (25 SRT packets), the appsink has been empty for 2 ms (`drainLinger`), or 20 ms have passed
+since the first buffer (`drainMaxHold`). The batch goes to the `send` callback
+(`srt.Client.Write`, which splits it into 1316-byte SRT packets in one more C call). One cgo
+crossing per batch, no allocation, and no bytes held back waiting for a full batch. No callback,
+no ring, no channel — the pull is the drain. The pull goroutine is a normal Go citizen, so it may block on the SRT write without
 ever touching a GStreamer streaming thread (the exact failure mode of the previous design, below).
 The same loop tracks **stats** — frames pulled/sent/dropped, bytes, throughput kbit/s (500 ms
 window), negotiated framerate (read once from the appsink's sink-pad caps), last-PTS — and a
@@ -258,8 +265,8 @@ ok   ctrlirl-coder/internal/controller
 | `internal/sinks/srtla` (pure Go)    | `Sender` relays complete SRT datagrams and feedback over registered uplinks; per-uplink congestion windows, REG1/2/3 handshake + keepalives, classic + enhanced schedulers, reference wire protocol, telemetry                                                                                                                                       | ✅ handshake, selection, feedback, reload, real SRT session e2e             |
 | `internal/gstutil` (gstreamer)      | `EnsureInit`, `FromLaunch` (comment stripping), `GetByName(Recurse)`, `SetStateSafe`, `Link`, `GetBytes`                                                                                                                                                                                                                                             | — (no unit tests; exercised by smoke runs)                                  |
 | `internal/layer` (gstreamer)        | Base framework: `Layer` interface, `BaseLayer` base class, `Chain.LinkChain` (post-insert linking), `MakeElement`/`SurfaceChain`/`Tail` helpers, BGRA tail. Concrete types in subpackages: `layer/video` (`VideoSource`), `layer/image` (`ImageOverlay`), `layer/text` (`TextOverlay`), `layer/browser` (`BrowserOverlay`), `layer/testcode` (timestamp/frame/QR overlay) — each embeds `BaseLayer` | ✅ pure QR/render tests; GStreamer smoke build |
-| `internal/compositor` (gstreamer)   | Command-goroutine `CompositorPipeline`: `AddLayer`/`RemoveLayer`/`UpdateLayerProps` (`scene.Applier`), `SetBitrate`/`SetOverlayText` (`sink.Applier`), NULL→PLAYING in `Start`, `Stop`, `checkContract` (verifies the `appsink` terminal, forces `drop=true`), `TapElement`                                                                          | — (smoke-verified)                                                          |
-| `internal/gstpull` (gstreamer, cgo) | Terminal `appsink` pull loop: ` gst_app_sink_pull_sample` on a dedicated goroutine → `send` callback per frame (`Run(ctx, send)`); stats (frames/bytes/throughput/framerate/PTS) + `Stalled()` frame-production detector. cgo to `libgstreamer-app`. See §2.5.                                                                                       | ✅ E2E `videotestsrc→appsink` pull + stall detection                        |
+| `internal/compositor` (gstreamer)   | Command-goroutine `CompositorPipeline`: `AddLayer`/`RemoveLayer`/`UpdateLayerProps` (`scene.Applier`), `SetBitrate`/`SetOverlayText` (`sink.Applier`), NULL→PLAYING in `Start`, `Stop`, `checkContract` (verifies the `appsink` terminal, forces `drop=false`), `TapElement`                                                                          | — (smoke-verified)                                                          |
+| `internal/gstpull` (gstreamer, cgo) | Terminal `appsink` pull loop: ` gst_app_sink_pull_sample` on a dedicated goroutine → `send` callback per batch of buffers (`Run(ctx, send)`, one cgo call per batch); stats (frames/bytes/throughput/framerate/PTS) + `Stalled()` frame-production detector. cgo to `libgstreamer-app`. See §2.5.                                                                                       | ✅ E2E `videotestsrc→appsink` pull + stall detection                        |
 
 The `MockStatsSource` reproduces the cumulative-counter semantics of the real `srtgo` socket's
 SRT counters, so the balancer and controller can be driven in CI without GStreamer (or a live SRT
@@ -276,7 +283,8 @@ peer).
    change log.
 2. **Terminal is `appsink name=appsink` (mandatory)** — `libgstreamer-app` (dev + runtime) is a
    build/runtime prerequisite, matching the original tool (§2.2). `contract.go` verifies the
-   element type and forces `drop=true`.
+   element type and forces `drop=false` + `max-buffers=600` (spec text says `drop=true`; changed
+   2026-11-25 for VOD pacing, see the change log).
 3. **Encoder property is `bitrate` (kbit/s)** — this is the _correct_ `x264enc` property and what
    the spec's §2 contract table says. Note the **original C code had a latent bug**: it called
    `g_object_set(el, "bps", …)` (see `ctrlirl_coder-orig/src/gst/encoder_control.c:53`), which is a
@@ -399,6 +407,16 @@ peer).
 
 ---
 
+14. **The appsink drain batches and flushes on idle.** The original sends each pulled buffer on
+    its own. Here one C call drains whatever the appsink holds into a batch (up to 25 SRT
+    packets) and the batch is sent as soon as the appsink has been empty for 2 ms, at the latest
+    20 ms after its first buffer (`internal/gstpull`: `drainLinger`, `drainMaxHold`). Reason: the
+    muxer emits ~4,400 188-byte buffers per second; sending (or even pulling) them one cgo call
+    at a time made the send path itself the bottleneck (change log 2026-11-25), and waiting for a
+    full 32 kB batch held a 500 kbit/s stream back by half a second.
+15. **`[srt] max_bandwidth_kbps` is converted to bytes/s** for `SRTO_MAXBW` (it was passed through
+    unconverted until 2026-11-28, capping a "6000" stream at 48 kbit/s).
+
 ## 5. What remains (next work)
 
 Done in this round:
@@ -446,6 +464,42 @@ Still open:
    session. `[srtla]` SIGHUP reload prepares replacement uplinks before closing old ones;
    operator instructions live in README.md ("SRT link aggregation").
 
+### 5.1 Open issues found on 2026-11-28 (not fixed)
+
+1. **The VOD drain pacer throttles live sources.** `gstpull`'s pacer clamps the drain to the
+   controller's target bitrate — the *video encoder's* target. What leaves the muxer is more
+   than that: audio, TS overhead, encoder overshoot. For a self-pacing live source the drain is
+   therefore held slightly *below* the production rate; the appsink (`drop=false`,
+   `max-buffers=600`) stays full, the pipeline is back-pressured and frames are lost. The
+   2026-11-25 entry's "for self-pacing live sources the drain never outruns the source → no-op"
+   does not hold. Measured with `scripts/test-stream.sh` (`example-full.pipeline`,
+   `videotestsrc is-live=true`, 10 s), pacer wired vs not wired:
+
+   | target | decoded frames | bytes at the listener | pulled rate |
+   | :-- | :-- | :-- | :-- |
+   | 6000 kbit/s, paced | 272 | 7.37 MB | pinned at 5981–6004 kbit/s |
+   | 6000 kbit/s, unpaced | 295 | 7.97 MB | 5955–6370 kbit/s |
+   | 500 kbit/s, paced | 78 | 0.63 MB | pinned at 500 kbit/s |
+   | 500 kbit/s, unpaced | 295 | 1.42 MB | 544–553 kbit/s |
+
+   The binary from before this round shows the same numbers, so it predates it. A fix needs a
+   decision: pace on stream time (the encoder's PTS against the wall clock) instead of on
+   bytes, or only pace when a VOD-capable source is attached. Raising the pace rate by a
+   margin is not a fix — a VOD source would then play that much too fast.
+2. **A browser layer whose page does not repaint still costs a PNG decode per frame.** The
+   feeder re-pushes the latest frame every frame interval to keep the layer's stream alive.
+   Measured (same PNG pushed through `appsrc ! pngdec ! videoconvert ! videoscale`): 90 % of a
+   core for a 1080p overlay at 60 fps, 46 % at 30 fps, 25 % for 720p at 30 fps — and an alert
+   overlay is static most of the time. `imagefreeze is-live=true allow-replace=true` behind
+   `pngdec` (push only new frames, re-seed after a READY freeze) brings a static page down to
+   3 %, but it re-samples frames on its own clock: one of four cadence-probe runs failed
+   `TestBrowserLineBounceSmoothness` with 6.3 % anomalous frames and 1.8 % beat pairs, against
+   0.2–0.4 % and 0 in nine runs of the current content-driven push. Not adopted. A design that
+   keeps the content-driven timing would decode once and re-push the *decoded* buffer on
+   keepalive ticks (raw-video appsrc fed from a decode stage).
+3. About 60 stale `ctrlirl-chrome-*` directories from before the 2026-11-28 fix may sit in the
+   temp dir of machines that ran browser layers; they are safe to delete.
+
 ---
 
 ## 6. Environment & verification status
@@ -474,6 +528,60 @@ Still open:
 ---
 
 ## 7. Change log
+
+- **2026-11-28 (speed / dedup / readability round 2):** Benchmarks first, then changes, then the
+  same benchmarks again; every optimization is in for a measured gain. Branch
+  `refactor/perf-dedup-2`, one commit per step.
+  - **Hot paths** (before → after):
+
+    | Path | Benchmark | Time | Allocation |
+    | :-- | :-- | :-- | :-- |
+    | Browser frame (300 kB) | `ScreencastDispatch` | 2533 µs → 126 µs | 708 → 306 KiB/op |
+    | Browser frame incl. websocket read | `ScreencastReadLoop` | 2675 µs → 159 µs | 1646 → 307 KiB/op |
+    | Appsink drain, 5000 TS buffers | `PullSendLoopTS` | 1.48 ms → 1.17 ms | 10014 → 11 allocs/op |
+    | SRTLA packet (enhanced, 2 uplinks) | `SendPacket/enhanced` | 1467 ns → 994 ns | 0 |
+    | SRTLA uplink choice | `SchedulerSelect/enhanced` | 552 ns → 114 ns | 0 |
+    | SRTLA ACK packet | `HandleFeedbackACK` | 769 ns → 329 ns | 1 → 0 allocs/op |
+    | RPC scene edit | `ModifyRoundTrip` | 25.8 µs → 2.7 µs | 249 → 19 allocs/op |
+    | Scene diff | `SceneDiffNoop` | 1.71 µs → 1.17 µs | 0 |
+    | Testcode frame | `Render` | 570 µs → 197 µs | 3641 → 41 KiB/op |
+
+    How: CDP messages decode in one typed pass, and `Page.screencastFrame` skips the JSON
+    decoder for the frame (exact-layout shortcut with the generic decoder as fallback); the
+    appsink is drained by one C call per batch (§2.5); schedulers read an uplink through one
+    locked snapshot and their per-uplink state lives on the uplink; RPC edits are validated
+    with `Scene.Finalize` instead of a JSON round trip. Tried and dropped: caching the SRT
+    epoll per connection (0.5 µs per send, not measurable).
+  - **Bugs fixed on the way:** `max_bandwidth_kbps` unit (deviation 15); the SRTLA NAK-burst
+    window re-read a stale count every fourth second and panicked when the wall clock stepped
+    back; `scene.Diff` dropped the pad-property change of an edit that also changed an
+    in-place filter; a wrongly-typed filter param was reported as "unknown param"; the final
+    partial batch at EOS was sent without being counted; a prepared layer (a browser layer's
+    Chrome) leaked when its attach failed or the pipeline was already stopped; every browser
+    session left its Chrome home in the temp dir (only the browser process was killed — the
+    whole process group is now); a pipeline with an appsink but no encoder dereferenced a nil
+    controller in the pacer; a data race on `latestFrame.first`.
+  - **Behavior changes:** the drain flushes when the appsink is idle (deviation 14); the
+    stream is frozen to READY only for batches that attach or detach more than one chain, not
+    for batches of in-place updates; an edit that changes pad properties and an in-place
+    filter reports both ops in `applied`; startup log lines carry `startup:` instead of
+    `dry-run:` on a normal run; `/metrics` reports the encoder limits of the reloaded config;
+    text-option errors list names sorted.
+  - **Structure:** `layer.Spec`/`layer.Build` replace the per-element build-and-check blocks
+    in every layer; one dynamic-pad linker; one appsrc push binding (`gstutil.PushBytes`);
+    `AddLayer` is prepare / attach / attach-audio with one failure path and the shared audio
+    tail goes through `attachChain`; the browser feeder runs on one context and is split into
+    frame source / poller / push loop; `cmd` has an `app` struct and `metrics.go`. Dead code
+    removed. The superseded `REFACTOR.md` is deleted.
+  - **Verification:** `go vet`, staticcheck, `deadcode -test`; `go test ./...` and `-race` on
+    the pure-Go, SRTLA, gstpull and compositor packages; a differential test of the refactored
+    SRTLA schedulers against a frozen copy of the old ones (identical picks and weights over
+    240,000 random steps); layer chains dumped before/after (identical); the testcode renderer
+    byte-compared with the old one; browser cadence probes (60.2 fps, 0 skipped/repeated, 0
+    beat pairs); `make dist-amd64`, `--dry-run`, `scripts/integration-smoke.sh`,
+    `scripts/test-stream.sh`, and a SIGHUP reload + RPC session against the built binary. Not
+    run: `make test-obs` and the interactive OBS/SRTLA scripts (they need a running OBS).
+  - **Open:** two findings that were measured but not changed — §5.1.
 
 - **2026-11-26 (browser test: 1080p30 default):** A 1080p60 stream into a
   30fps OBS project looks hickup-y (OBS 2:1-decimates the source). New
@@ -1602,7 +1710,7 @@ diag` bytes linear through the switch, no stall). The 0.7–1.5 s
   env var disables the READY freeze for diagnostics. Real-viewer
   (OBS) switching latency is the viewer's own input buffering (~0.2 s
   steady-state), not the app.
-- **2026-11-22 (REFACTOR.md complete):** Executed the multi-phase refactor
+- **2026-11-22 (REFACTOR.md complete; the file was removed on 2026-11-28):** Executed the multi-phase refactor
   (commits `f3be79b..8d8d773`): package reorganization
   (`internal/layer`, `internal/compositor`, `internal/scene`, `internal/rpc`,
   `internal/gstutil`), Chain-based layer pipeline with the

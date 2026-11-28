@@ -118,6 +118,14 @@ Response:
 { "jsonrpc": "2.0", "id": 42, "result": { "applied": ["update:cam0"] } }
 ```
 
+`applied` lists what the edit did to the pipeline, as `<op>:<layer id>` in
+the order it was applied: `remove`, `update` (compositor-pad properties),
+`update-filter` (an in-place filter change), `add`. One edit can produce
+several entries — e.g. `["update:alerts", "update-filter:alerts"]` when it
+moves a layer and changes its volume, or `["remove:cam0", "add:cam0"]` when
+the change needs the layer's chain rebuilt. An empty list means nothing
+changed.
+
 Errors use standard codes: `-32700` parse error, `-32600` invalid request,
 `-32601` method not found, `-32602` invalid params. Application errors
 (validation, pipeline apply failure) use `-32000` with a descriptive message.

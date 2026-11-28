@@ -27,7 +27,9 @@ latency = 2000
 
 # Note: stream_id is set via -s flag (not in config, rarely changes)
 
-# Optional send-rate cap in kbit/s (SRTO_MAXBW). 0 = uncapped (SRT decides).
+# Optional send-rate cap in kbit/s (converted to the bytes/s SRTO_MAXBW takes).
+# 0 = uncapped (SRT decides). Leave headroom above max_bitrate for audio, TS
+# overhead and retransmissions.
 # max_bandwidth_kbps = 0
 
 [srtla]
