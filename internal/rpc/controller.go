@@ -55,7 +55,10 @@ func (c *Controller) Current() *scene.Scene {
 func (c *Controller) SceneNames() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return slices.Sorted(maps.Keys(c.scenes))
+	// Never nil: the list is serialized, and clients expect [] for "none".
+	names := slices.AppendSeq(make([]string, 0, len(c.scenes)), maps.Keys(c.scenes))
+	slices.Sort(names)
+	return names
 }
 
 // Scene returns a named scene (deep copy). ok is false when unknown.

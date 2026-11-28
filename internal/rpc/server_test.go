@@ -599,3 +599,18 @@ func TestModifyConcurrentNoLostEdit(t *testing.T) {
 		t.Fatalf("edit B lost: b.alpha = %v, want 1", bAlpha)
 	}
 }
+
+// The scene list is part of the wire format: an empty list is [], never
+// null, and names come sorted.
+func TestSceneNamesEmptyIsListAndSorted(t *testing.T) {
+	ctl := New(&recApplier{}, nil, nil)
+	if got := mustJSON(t, ctl.SceneNames()); got != "[]" {
+		t.Fatalf("no scenes: SceneNames encodes as %s, want []", got)
+	}
+	for _, name := range []string{"b", "c", "a"} {
+		ctl.Register(name, &scene.Scene{Name: name})
+	}
+	if got := mustJSON(t, ctl.SceneNames()); got != `["a","b","c"]` {
+		t.Fatalf("SceneNames = %s, want sorted", got)
+	}
+}
