@@ -1,3 +1,10 @@
+## [1.3.8](https://github.com/majklovec/ctrlirl-coder/compare/v1.3.7...v1.3.8) (2026-11-28)
+
+
+### Bug Fixes
+
+* **apt:** key ([84baf03](https://github.com/majklovec/ctrlirl-coder/commit/84baf0329648fb00547b00f7226da8e8e0d627be))
+
 ## [1.3.7](https://github.com/majklovec/ctrlirl-coder/compare/v1.3.6...v1.3.7) (2026-11-27)
 
 
