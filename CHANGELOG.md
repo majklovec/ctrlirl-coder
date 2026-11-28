@@ -1,3 +1,22 @@
+## [1.3.9](https://github.com/majklovec/ctrlirl-coder/compare/v1.3.8...v1.3.9) (2026-11-28)
+
+
+### Bug Fixes
+
+* **browser:** kill Chrome's whole process group; stop leaking its home dir ([9abfddd](https://github.com/majklovec/ctrlirl-coder/commit/9abfddd02c768838262fcda26d4ce8ceb2e1a468))
+* **rpc:** scene.names of an empty registry is [] again, not null ([97e74f1](https://github.com/majklovec/ctrlirl-coder/commit/97e74f199b25645e0879a5c5baa59ea7fa3d8192))
+* **scene:** apply pad and filter changes of one edit; report param type errors ([5da6ac7](https://github.com/majklovec/ctrlirl-coder/commit/5da6ac7e873f98d11c75940b488a90e144379187))
+* **srt:** convert max_bandwidth_kbps to the bytes/s SRTO_MAXBW takes ([84e30da](https://github.com/majklovec/ctrlirl-coder/commit/84e30da4f02b98910a5134cf3a5218574e747300))
+* **srtla:** NAK burst window re-read stale counts and panicked on a clock step ([41322e0](https://github.com/majklovec/ctrlirl-coder/commit/41322e075507a8f60fb59a88f2a72e8d3065d411))
+
+
+### Performance Improvements
+
+* **browser:** decode CDP frames in one pass; shortcut around JSON for screencast ([2de48cc](https://github.com/majklovec/ctrlirl-coder/commit/2de48ccbe47b6d8d4d55dc6cf80f9e802d992346))
+* **gstpull:** drain the appsink in one cgo call per batch; flush when idle ([6a939cd](https://github.com/majklovec/ctrlirl-coder/commit/6a939cd8c4df277ec93963b600713c9cafed38ba))
+* **srtla:** one lock per uplink per packet; scheduler state on the uplink ([766df12](https://github.com/majklovec/ctrlirl-coder/commit/766df12c150943c03f470a7b4ca3c57c61cf919e))
+* **testcode:** reuse the frame buffer; fill rectangles by row ([f14ed45](https://github.com/majklovec/ctrlirl-coder/commit/f14ed4590122c1f20f4d40bbadd79a2ac49a7d89))
+
 ## [1.3.8](https://github.com/majklovec/ctrlirl-coder/compare/v1.3.7...v1.3.8) (2026-11-28)
 
 
