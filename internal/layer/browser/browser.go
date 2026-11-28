@@ -161,7 +161,9 @@ func (b *BrowserOverlay) runBrowser() {
 	defer close(b.done)
 	sess, err := newCDPSession(b.ctx, b.url, b.sink, b.width, b.height)
 	if err != nil {
-		slog.Error("layer: failed to launch Chrome", "id", b.L.ID, "err", err)
+		if b.ctx.Err() == nil { // not an error when the layer was closed meanwhile
+			slog.Error("layer: failed to launch Chrome", "id", b.L.ID, "err", err)
+		}
 		return
 	}
 	defer sess.stop()

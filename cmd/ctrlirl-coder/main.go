@@ -83,17 +83,6 @@ func pipelineContract(text string) (missingMandatory, present []string) {
 	return missingMandatory, present
 }
 
-// validatePipelineContract checks the resolved template text against the
-// contract (spec §2). Both --pipeline and the [pipeline] template go through
-// it, dry-run or not (bug H).
-func validatePipelineContract(text string) error {
-	missing, _ := pipelineContract(text)
-	if len(missing) > 0 {
-		return fmt.Errorf("pipeline contract: missing mandatory element(s): %s", strings.Join(missing, ", "))
-	}
-	return nil
-}
-
 // logLevel reads CTRLIRL_LOG_LEVEL (debug|info|warn|error) for the slog
 // handler; defaults to info.
 func logLevel() slog.Level {

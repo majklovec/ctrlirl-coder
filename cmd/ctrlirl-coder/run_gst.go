@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -27,42 +28,54 @@ import (
 	"ctrlirl-coder/internal/sinks/srtla"
 )
 
+// app is the running encoder: what run wires together, and what a SIGHUP
+// reload and the API need to reach afterwards.
+type app struct {
+	opts   *options
+	cfg    atomic.Pointer[config.Config] // swapped by a SIGHUP reload, read by /metrics
+	cp     *compositor.CompositorPipeline
+	sink   sinks.Sink
+	puller *gstpull.Puller        // nil: the pipeline has no terminal appsink
+	ctl    *controller.Controller // nil: adaptive loop disabled
+	rpc    *rpc.Controller        // owns the running scene
+}
+
 func run(o *options) error {
 	// Config, pipeline text and the initial scene are each loaded exactly
-	// once here; --dry-run validates the same text and stops before any
-	// GStreamer work (bug H: the contract is checked whether the template
-	// comes from --pipeline or [pipeline] template).
+	// once here; --dry-run validates the same inputs and stops before any
+	// GStreamer work.
+	stage := "startup: "
+	if o.dryRun {
+		stage = "dry-run: "
+	}
 	cfg, err := config.Load(o.configPath)
 	if err != nil {
 		return err
 	}
-	slog.Info("dry-run: config OK",
+	slog.Info(stage+"config OK",
 		"balancer", cfg.General.Balancer,
 		"min_kbps", cfg.General.MinBitrateKbps,
 		"max_kbps", cfg.General.MaxBitrateKbps,
 		"srt_uri", cfg.SRT.URI)
 
+	// The contract is validated for the template no matter where it came
+	// from (--pipeline or [pipeline] template), dry-run or not.
 	pipelineText, err := readPipelineText(o, cfg)
 	if err != nil {
 		return err
 	}
-	// Bug H: the contract is validated for the template no matter where it
-	// came from (--pipeline or [pipeline] template), not just in dry-run.
-	if err := validatePipelineContract(pipelineText); err != nil {
-		return err
+	missing, present := pipelineContract(pipelineText)
+	if len(missing) > 0 {
+		return fmt.Errorf("pipeline contract: missing mandatory element(s): %s", strings.Join(missing, ", "))
 	}
-	if o.dryRun || o.pipeline != "" {
-		_, present := pipelineContract(pipelineText)
-		slog.Info("dry-run: pipeline OK", "elements", strings.Join(present, " "))
-	}
+	slog.Info(stage+"pipeline OK", "elements", strings.Join(present, " "))
 
-	var curScene *scene.Scene
+	var initial *scene.Scene
 	if o.scenePath != "" {
-		curScene, err = scene.Load(o.scenePath)
-		if err != nil {
+		if initial, err = scene.Load(o.scenePath); err != nil {
 			return err
 		}
-		slog.Info("dry-run: scene OK", "name", curScene.Name, "layers", len(curScene.Layers))
+		slog.Info(stage+"scene OK", "name", initial.Name, "layers", len(initial.Layers))
 	}
 
 	if o.dryRun {
@@ -74,11 +87,8 @@ func run(o *options) error {
 	if err != nil {
 		return fmt.Errorf("pipeline: %w", err)
 	}
-	var (
-		client    sinks.Sink
-		puller    *gstpull.Puller
-		startSink func(context.Context)
-	)
+	a := &app{opts: o, cp: cp}
+	a.cfg.Store(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Single ordered teardown on every exit path. The order is critical:
@@ -89,26 +99,26 @@ func run(o *options) error {
 	//     thread and makes a drain blocked in the appsink pull return),
 	//  3. puller.Detach() drops the appsink reference — only AFTER the
 	//     freeze, since releasing a live element while PLAYING deadlocks,
-	//  4. client.Close() last, so no in-flight write races the teardown.
+	//  4. sink.Close() last, so no in-flight write races the teardown.
 	defer func() {
 		cancel()
 		if err := cp.Stop(); err != nil {
 			slog.Error("pipeline stop", "err", err)
 		}
-		if puller != nil {
-			puller.Detach()
+		if a.puller != nil {
+			a.puller.Detach()
 		}
-		if client != nil {
-			client.Close()
+		if a.sink != nil {
+			a.sink.Close()
 		}
 	}()
 
-	if err := attachScene(cp, curScene); err != nil {
+	if err := attachScene(cp, initial); err != nil {
 		return err
 	}
 
-	client, puller, startSink, err = startDataPath(cp, cfg)
-	if err != nil {
+	var startSink func(context.Context)
+	if a.sink, a.puller, startSink, err = startDataPath(cp, cfg); err != nil {
 		return err
 	}
 
@@ -117,26 +127,28 @@ func run(o *options) error {
 	}
 	slog.Info("pipeline playing")
 
-	if puller != nil {
-		go startSink(ctx)                // srt: connect w/ backoff; srtla: aggregate uplinks
-		go puller.Run(ctx, client.Write) // pop bytes → sink; 1×-paced, backpressure on VOD
+	if a.puller != nil {
+		go startSink(ctx)                  // srt: connect w/ backoff; srtla: aggregate uplinks
+		go a.puller.Run(ctx, a.sink.Write) // appsink bytes → sink; 1×-paced, backpressure on VOD
 		slog.Info("sink: data path running", "sink", cfg.Sink)
-		go logAppsinkStats(ctx, puller)
-		go logSinkStats(ctx, client)
+		go logAppsinkStats(ctx, a.puller)
+		go logSinkStats(ctx, a.sink)
 	}
 
-	ctl := startController(ctx, client, puller, cp, cfg)
+	a.ctl = startController(ctx, a.sink, a.puller, cp, cfg)
 
 	// Pace the appsink drain at the adaptive target so VOD sources (HLS
 	// EXT-X-ENDLIST, local file) play at 1× wall clock instead of draining
-	// at network speed and hitting EOS. Live sources are self-pacing, so
-	// the pacer is a no-op for them. Wired after the controller exists
+	// at network speed and hitting EOS. Wired after the controller exists
 	// because the target is the balancer's live state.
-	if puller != nil {
-		puller.SetPaceRateSupplier(func() int64 { return int64(ctl.CurBitrate()) })
+	if a.puller != nil && a.ctl != nil {
+		a.puller.SetPaceRateSupplier(func() int64 { return int64(a.ctl.CurBitrate()) })
 	}
 
-	apiSrv, rpcCtl, err := startAPI(ctx, o, cfg, cp, curScene, client, puller, ctl)
+	// The scene controller exists even without an API listener: SIGHUP
+	// reloads go through it.
+	a.rpc = rpc.New(cp, initial, slog.Default())
+	apiSrv, err := a.startAPI(ctx)
 	if err != nil {
 		return err
 	}
@@ -144,31 +156,8 @@ func run(o *options) error {
 		defer apiSrv.Stop()
 	}
 
-	sinkReload := makeSinkReload(client, cfg)
-
-	return signalLoop(ctx, o, cfg, ctl, rpcCtl, cp, sinkReload)
-}
-
-// makeSinkReload returns a closure that re-applies a reloaded config to the
-// output sink, or nil when the sink does not support it (direct SRT has no
-// reloadable state). Used by SIGHUP to swap the SRTLA uplink set without
-// restarting the pipeline.
-func makeSinkReload(client sinks.Sink, cfg *config.Config) func(*config.Config) error {
-	if cfg.Sink != config.SinkSRTLA {
-		return nil
-	}
-	r, ok := client.(interface {
-		Reload(srtla.Config) error
-	})
-	if !ok {
-		return nil
-	}
-	return func(nx *config.Config) error {
-		if nx.Sink != config.SinkSRTLA {
-			return nil
-		}
-		return r.Reload(nx.SRTLA.ToSRTLAConfig())
-	}
+	a.signalLoop(ctx)
+	return nil
 }
 
 // attachScene applies every layer of the initial scene to the compositor.
@@ -188,6 +177,18 @@ func attachScene(cp *compositor.CompositorPipeline, sc *scene.Scene) error {
 		slog.Info("scene: layer attached", "id", l.ID, "type", l.Type, "filters", len(l.Filters))
 	}
 	return nil
+}
+
+// srtClientConfig is the [srt] session configuration for a client dialing
+// uri (the configured destination, or the local SRTLA relay).
+func srtClientConfig(cfg *config.Config, uri string) srt.ClientConfig {
+	return srt.ClientConfig{
+		URI:              uri,
+		LatencyMs:        cfg.SRT.LatencyMs,
+		StreamID:         cfg.SRT.StreamID,
+		Passphrase:       cfg.SRT.Passphrase,
+		MaxBandwidthKbps: cfg.SRT.MaxBandwidthKbps,
+	}
 }
 
 // startDataPath builds the configured output sink (srt or srtla, chosen by the
@@ -223,13 +224,7 @@ func startDataPath(cp *compositor.CompositorPipeline, cfg *config.Config) (sinks
 			}
 		}
 	default: // config.SinkSRT
-		client, err := srt.NewClient(srt.ClientConfig{
-			URI:              cfg.SRT.URI,
-			LatencyMs:        cfg.SRT.LatencyMs,
-			StreamID:         cfg.SRT.StreamID,
-			Passphrase:       cfg.SRT.Passphrase,
-			MaxBandwidthKbps: cfg.SRT.MaxBandwidthKbps,
-		}, slog.Default())
+		client, err := srt.NewClient(srtClientConfig(cfg, cfg.SRT.URI), slog.Default())
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("srt: %w", err)
 		}
@@ -255,85 +250,25 @@ func startDataPath(cp *compositor.CompositorPipeline, cfg *config.Config) (sinks
 // startAPI starts the shared HTTP API server: the JSON-RPC 2.0 control
 // endpoint (POST /rpc) and the /metrics endpoint (GET, Prometheus text
 // exposition format) under one listener — the --api-addr flag wins over
-// [control] addr. The controller owns the scene state and is returned even
-// when no address is configured, because SIGHUP reloads go through it.
-// Returns a nil server when disabled.
-func startAPI(ctx context.Context, o *options, cfg *config.Config, cp *compositor.CompositorPipeline, curScene *scene.Scene, sink sinks.StatsSource, puller *gstpull.Puller, ctl *controller.Controller) (*server.Server, *rpc.Controller, error) {
-	rpcCtl := rpc.New(cp, curScene, slog.Default())
-	addr := cfg.Control.Addr
-	if o.apiAddr != "" {
-		addr = o.apiAddr
+// [control] addr. Returns a nil server when no address is configured.
+func (a *app) startAPI(ctx context.Context) (*server.Server, error) {
+	addr := a.cfg.Load().Control.Addr
+	if a.opts.apiAddr != "" {
+		addr = a.opts.apiAddr
 	}
 	if addr == "" {
-		return nil, rpcCtl, nil
+		return nil, nil
 	}
-	srv, err := server.New(server.Config{
-		Addr: addr,
-	}, map[string]http.Handler{
-		"/rpc": rpc.NewServer(rpcCtl),
-		"/metrics": metrics.Handler(func() []metrics.Point {
-			pts := make([]metrics.Point, 0, 24)
-			if st, err := sink.Stats(); err == nil {
-				pts = append(pts,
-					metrics.Point{Name: "sink_rtt_ms", Value: st.RTT},
-					metrics.Point{Name: "sink_loss_pct", Value: st.PacketLossRate},
-					metrics.Point{Name: "sink_send_mbps", Value: st.SendRateMbps},
-					metrics.Point{Name: "sink_retrans_pps", Value: st.RetransmitRate},
-					metrics.Point{Name: "sink_send_buffer_bytes", Value: float64(st.SendBufferBytes)},
-					metrics.Point{Name: "sink_acks_total", Value: float64(st.ACKTotal), Type: metrics.TypeCounter},
-					metrics.Point{Name: "sink_pkts_total", Value: float64(st.PacketsSentTotal), Type: metrics.TypeCounter},
-				)
-			}
-			if puller != nil {
-				pts = append(pts,
-					metrics.Point{Name: "frames", Value: float64(puller.Frames()), Type: metrics.TypeCounter},
-					metrics.Point{Name: "frames_dropped", Value: float64(puller.Dropped()), Type: metrics.TypeCounter},
-					metrics.Point{Name: "bytes_sent", Value: float64(puller.BytesSent()), Type: metrics.TypeCounter},
-					metrics.Point{Name: "encoder_kbps", Value: float64(puller.ThroughputKbps())},
-					metrics.Point{Name: "last_frame_age_ms", Value: puller.LastFrameAge().Seconds() * 1000},
-				)
-			}
-			if ctl != nil {
-				rttMin, rttMax := ctl.RTTRange()
-				pts = append(pts,
-					metrics.Point{Name: "encoder_target_kbps", Value: float64(ctl.CurBitrate()) / 1000},
-					metrics.Point{Name: "encoder_min_kbps", Value: float64(cfg.General.MinBitrateKbps)},
-					metrics.Point{Name: "encoder_max_kbps", Value: float64(cfg.General.MaxBitrateKbps)},
-					metrics.Point{Name: "encoder_rtt_min_ms", Value: rttMin},
-					metrics.Point{Name: "encoder_rtt_max_ms", Value: rttMax},
-				)
-			}
-			if d, ok := sink.(srtla.DetailedProvider); ok {
-				det := d.Detailed()
-				pts = append(pts,
-					metrics.Point{Name: "srtla_uplinks_total", Value: float64(len(det.Uplinks))},
-					metrics.Point{Name: "srtla_uplinks_active", Value: float64(det.ActiveConns)},
-					metrics.Point{Name: "srtla_connected", Value: metrics.Bool(det.HasConnected)},
-					metrics.Point{Name: "srtla_failover", Value: metrics.Bool(det.Failover)},
-					metrics.Point{Name: "srtla_mode_enhanced", Value: metrics.Bool(det.Mode == srtla.ModeEnhanced)},
-				)
-				for _, u := range det.Uplinks {
-					prefix := fmt.Sprintf("srtla_uplink_%d", u.ID)
-					pts = append(pts,
-						metrics.Point{Name: prefix + "_rtt_ms", Value: u.RTTMs},
-						metrics.Point{Name: prefix + "_inflight", Value: float64(u.InFlight)},
-						metrics.Point{Name: prefix + "_window", Value: float64(u.Window)},
-						metrics.Point{Name: prefix + "_weight", Value: u.Weight},
-						metrics.Point{Name: prefix + "_up", Value: metrics.Bool(u.Established)},
-						metrics.Point{Name: prefix + "_nak_burst", Value: float64(u.NAKBurst)},
-						metrics.Point{Name: prefix + "_last_activity_ms", Value: u.LastActivityMs},
-					)
-				}
-			}
-			return pts
-		}),
+	srv, err := server.New(server.Config{Addr: addr}, map[string]http.Handler{
+		"/rpc":     rpc.NewServer(a.rpc),
+		"/metrics": metrics.Handler(a.metricPoints),
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("api: %w", err)
+		return nil, fmt.Errorf("api: %w", err)
 	}
 	srv.Start(ctx)
 	slog.Info("api: HTTP server listening", "addr", srv.Addr())
-	return srv, rpcCtl, nil
+	return srv, nil
 }
 
 // logSinkStats logs a sink statistics sample every 5 s — the structured
@@ -405,56 +340,63 @@ func startController(ctx context.Context, src sinks.StatsSource, puller *gstpull
 }
 
 // signalLoop serves SIGHUP (in-place reload, §7.8) until SIGINT/SIGTERM
-// (graceful stop; the caller's deferred teardown runs the ordered shutdown).
-func signalLoop(ctx context.Context, o *options, cfg *config.Config, ctl *controller.Controller, rpcCtl *rpc.Controller, cp *compositor.CompositorPipeline, sinkReload func(*config.Config) error) error {
+// (graceful stop; run's deferred teardown does the ordered shutdown).
+func (a *app) signalLoop(ctx context.Context) {
 	sigCh := make(chan os.Signal, 4)
 	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
 	for sig := range sigCh {
-		switch sig {
-		case syscall.SIGHUP:
-			cfg = reload(ctx, o, cfg, ctl, rpcCtl, cp, sinkReload)
-		case syscall.SIGINT, syscall.SIGTERM:
-			slog.Info("signal received; shutting down", "signal", sig)
-			return nil
+		if sig == syscall.SIGHUP {
+			a.reload(ctx)
+			continue
 		}
+		slog.Info("signal received; shutting down", "signal", sig)
+		return
 	}
-	return nil
 }
 
-// reload re-reads the config and the scene on SIGHUP and returns the
-// (possibly updated) config. File reload is authoritative: the file's layers
-// replace the controller's current scene (RPC mutations not in the file are
-// removed; a failed op rolls the reload back).
-func reload(ctx context.Context, o *options, cfg *config.Config, ctl *controller.Controller, rpcCtl *rpc.Controller, cp *compositor.CompositorPipeline, sinkReload func(*config.Config) error) *config.Config {
+// reload re-reads the config and the scene on SIGHUP. A config that fails
+// to load leaves everything as it is. The scene file is authoritative: its
+// layers replace the controller's current scene (RPC mutations not in the
+// file are removed; a failed op rolls the reload back).
+func (a *app) reload(ctx context.Context) {
 	slog.Info("SIGHUP: reloading config and scene")
-	nx, err := config.Load(o.configPath)
+	cfg, err := config.Load(a.opts.configPath)
 	if err != nil {
 		slog.Error("config reload failed; keeping previous", "err", err)
-		return cfg
+		return
 	}
-	cfg = nx
-	if ctl != nil {
-		ctl.UpdateConfig(cfg)
+	a.cfg.Store(cfg)
+	if a.ctl != nil {
+		a.ctl.UpdateConfig(cfg)
 	}
-	if sinkReload != nil {
-		if err := sinkReload(cfg); err != nil {
-			slog.Error("sink reload failed", "sink", cfg.Sink, "err", err)
-		}
+	if err := a.reloadSink(cfg); err != nil {
+		slog.Error("sink reload failed", "sink", cfg.Sink, "err", err)
 	}
-	if o.scenePath != "" && cp.HasCompositor() {
-		newScene, err := scene.Load(o.scenePath)
-		if err != nil {
-			slog.Error("scene reload: load", "err", err)
-			return cfg
-		}
-		ops, err := rpcCtl.Replace(ctx, newScene)
-		if err != nil {
-			slog.Error("scene reload: apply rolled back", "err", err, "applied", len(ops))
-		} else {
-			slog.Info("scene reload: applied", "layers", len(newScene.Layers), "ops", len(ops))
-		}
+	if a.opts.scenePath == "" || !a.cp.HasCompositor() {
+		return
 	}
-	return cfg
+	next, err := scene.Load(a.opts.scenePath)
+	if err != nil {
+		slog.Error("scene reload: load", "err", err)
+		return
+	}
+	ops, err := a.rpc.Replace(ctx, next)
+	if err != nil {
+		slog.Error("scene reload: apply rolled back", "err", err, "applied", len(ops))
+		return
+	}
+	slog.Info("scene reload: applied", "layers", len(next.Layers), "ops", len(ops))
+}
+
+// reloadSink re-applies a reloaded config to the output sink. Only SRTLA has
+// reloadable state (the uplink set is swapped without restarting the
+// pipeline); the sink kind itself cannot change at runtime.
+func (a *app) reloadSink(cfg *config.Config) error {
+	r, ok := a.sink.(interface{ Reload(srtla.Config) error })
+	if !ok || cfg.Sink != config.SinkSRTLA {
+		return nil
+	}
+	return r.Reload(cfg.SRTLA.ToSRTLAConfig())
 }
 
 // readPipelineText resolves the launch string: --pipeline file wins, then the

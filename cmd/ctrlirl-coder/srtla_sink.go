@@ -40,13 +40,7 @@ func newSRTLASink(cfg *config.Config, log *slog.Logger) (*srtlaSink, error) {
 	if err != nil {
 		return nil, fmt.Errorf("srtla: bind local SRT relay: %w", err)
 	}
-	client, err := srt.NewClient(srt.ClientConfig{
-		URI:              "srt://" + relay.LocalAddr().String(),
-		LatencyMs:        cfg.SRT.LatencyMs,
-		StreamID:         cfg.SRT.StreamID,
-		Passphrase:       cfg.SRT.Passphrase,
-		MaxBandwidthKbps: cfg.SRT.MaxBandwidthKbps,
-	}, log)
+	client, err := srt.NewClient(srtClientConfig(cfg, "srt://"+relay.LocalAddr().String()), log)
 	if err != nil {
 		relay.Close()
 		return nil, fmt.Errorf("srtla: create SRT client: %w", err)
@@ -143,16 +137,14 @@ func (s *srtlaSink) Stats() (sinks.Stats, error) {
 	if err != nil {
 		return sinks.Stats{}, err
 	}
-	aggregate.RTT = session.RTT
-	aggregate.PacketLossRate = session.PacketLossRate
-	aggregate.SendRateMbps = session.SendRateMbps
-	aggregate.BandwidthEstimate = session.BandwidthEstimate
-	aggregate.RetransmitRate = session.RetransmitRate
-	aggregate.PktSndLossTotal = session.PktSndLossTotal
-	aggregate.PktRetransTotal = session.PktRetransTotal
-	aggregate.SendBufferBytes = session.SendBufferBytes
-	aggregate.PacketsReceivedTotal = session.PacketsReceivedTotal
-	return aggregate, nil
+	// The SRT session knows the end-to-end link (RTT, loss, rates, send
+	// buffer); only the feedback and packet counters and the sample time
+	// come from the aggregator, which sees every uplink.
+	st := session
+	st.ACKTotal = aggregate.ACKTotal
+	st.PacketsSentTotal = aggregate.PacketsSentTotal
+	st.TimestampMs = aggregate.TimestampMs
+	return st, nil
 }
 
 func (s *srtlaSink) Reload(cfg srtla.Config) error {
