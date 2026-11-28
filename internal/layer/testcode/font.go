@@ -52,43 +52,20 @@ var font5x7 = map[byte][7]uint8{
 
 // drawText paints text into the BGRA frame at (x, y) with the given integer
 // scale and color (B, G, R). The advance is 6 scaled px per character
-// (5 glyph + 1 gap).
+// (5 glyph + 1 gap). Characters without a glyph leave a blank cell.
 func drawText(frame []byte, w int, x, y, scale int, color [3]byte, text string) {
 	for _, ch := range text {
-		if ch > 0x7F {
-			ch = ' '
+		var glyph [7]uint8
+		if ch <= 0x7F {
+			glyph = font5x7[byte(ch)]
 		}
-		g, ok := font5x7[byte(ch)]
-		if !ok {
-			g = [7]uint8{}
-		}
-		for ry, row := range g {
+		for ry, row := range glyph {
 			for rx := 0; rx < 5; rx++ {
-				if row&(1<<uint(4-rx)) == 0 {
-					continue
-				}
-				for dy := 0; dy < scale; dy++ {
-					for dx := 0; dx < scale; dx++ {
-						putPixel(frame, w, x+rx*scale+dx, y+ry*scale+dy, color)
-					}
+				if row&(1<<uint(4-rx)) != 0 {
+					fillRect(frame, w, x+rx*scale, y+ry*scale, scale, scale, color)
 				}
 			}
 		}
 		x += 6 * scale
 	}
-}
-
-// putPixel sets one BGRA pixel, bounds-checked.
-func putPixel(frame []byte, w int, x, y int, c [3]byte) {
-	if w <= 0 || x < 0 || y < 0 || x >= w {
-		return
-	}
-	i := (y*w + x) * 4
-	if i < 0 || i+3 >= len(frame) {
-		return
-	}
-	frame[i] = c[0]   // B
-	frame[i+1] = c[1] // G
-	frame[i+2] = c[2] // R
-	frame[i+3] = 0xFF
 }
