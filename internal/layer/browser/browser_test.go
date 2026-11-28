@@ -115,3 +115,42 @@ for(let y=0;y<360;y+=8){
 		t.Errorf("background pixel alpha = %#x, want 0 (transparent)", a)
 	}
 }
+
+// chromeHomes lists the Chrome home directories currently in the temp dir.
+func chromeHomes(t *testing.T) map[string]bool {
+	t.Helper()
+	dirs, err := filepath.Glob(filepath.Join(os.TempDir(), "ctrlirl-chrome-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := make(map[string]bool, len(dirs))
+	for _, d := range dirs {
+		set[d] = true
+	}
+	return set
+}
+
+// Every session used to leave its Chrome home behind in the temp dir: only
+// the browser process was killed, and its children were still writing into
+// the profile while it was being removed.
+func TestCDPSessionStopRemovesChromeHome(t *testing.T) {
+	if _, err := findChrome(); err != nil {
+		t.Skip("no Chrome available")
+	}
+	before := chromeHomes(t)
+	for i := 0; i < 3; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+		sess, err := newCDPSession(ctx, "", "", 640, 360)
+		cancel()
+		if err != nil {
+			t.Fatalf("newCDPSession: %v", err)
+		}
+		sess.stop()
+	}
+	time.Sleep(300 * time.Millisecond) // a straggler would recreate its files by now
+	for d := range chromeHomes(t) {
+		if !before[d] {
+			t.Errorf("Chrome home left behind: %s", d)
+		}
+	}
+}

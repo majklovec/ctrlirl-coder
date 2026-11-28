@@ -32,6 +32,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/coder/websocket"
@@ -211,6 +212,8 @@ func newCDPSession(ctx context.Context, url, audioSink string, w, h int) (_ *cdp
 	}
 	s.cmd = exec.Command(bin, chromeArgs(userDir, port, audioSink, w, h)...)
 	s.cmd.Env = chromeEnv(userDir, audioSink)
+	// Its own process group, so stop() can kill the whole tree.
+	s.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := s.cmd.Start(); err != nil {
 		os.RemoveAll(userDir)
 		return nil, fmt.Errorf("layer: launch %s: %w", bin, err)
@@ -367,16 +370,33 @@ func (s *cdpsession) preparePage(ctx context.Context, url string, w, h int) erro
 	return nil
 }
 
-// stop kills Chrome and removes the profile directory.
+// stop kills Chrome and removes its home directory.
+//
+// Chrome is a process tree (browser, zygotes, renderers, GPU, crashpad).
+// Killing only the browser process left the children to die on their own
+// while still writing into the profile, so the removal raced them and a
+// stray directory stayed behind in the temp dir for every session. The whole
+// process group is killed instead (Chrome runs in its own, see
+// newCDPSession), and the removal is retried briefly for the stragglers that
+// escaped the group.
 func (s *cdpsession) stop() {
 	if s.ws != nil {
 		_ = s.ws.Close(websocket.StatusNormalClosure, "")
 	}
 	if s.cmd != nil && s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
+		if err := syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			_ = s.cmd.Process.Kill()
+		}
 	}
 	<-s.done
-	os.RemoveAll(s.userDir)
+	for attempt := 0; attempt < 20; attempt++ {
+		os.RemoveAll(s.userDir)
+		if _, err := os.Stat(s.userDir); os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	slog.Warn("layer: chrome home not removed", "dir", s.userDir)
 }
 
 // Stopped reports Chrome exit.
